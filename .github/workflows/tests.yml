@@ -2,8 +2,6 @@ name: Tests
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '*/10 * * * *'
 
 permissions:
   contents: read
@@ -11,7 +9,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -25,8 +23,6 @@ jobs:
       - name: Install Dependencies
         run: composer install --prefer-dist --no-progress
 
-      # Mengecek semua GitHub Secrets tersedia.
-      # Tidak menampilkan isi secret ke log.
       - name: Validate Required Secrets
         env:
           OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
@@ -47,7 +43,7 @@ jobs:
             OCI_SSH_PUBLIC_KEY
           do
             if [ -z "${!VAR}" ]; then
-              echo "ERROR: $VAR kosong atau belum dibuat."
+              echo "ERROR: $VAR kosong."
               FAILED=1
             else
               echo "OK: $VAR tersedia."
@@ -58,7 +54,6 @@ jobs:
             exit 1
           fi
 
-      # Membuat file private API signing key Oracle
       - name: Create OCI Private Key File
         env:
           OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
@@ -66,8 +61,6 @@ jobs:
           printf '%s\n' "$OCI_KEY_CONTENT" > "$GITHUB_WORKSPACE/private_key.pem"
           chmod 600 "$GITHUB_WORKSPACE/private_key.pem"
 
-      # Memastikan private key .pem benar-benar pasangan
-      # dari fingerprint API key Oracle yang kita masukkan.
       - name: Validate OCI API Key Pair
         env:
           EXPECTED_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
@@ -87,18 +80,73 @@ jobs:
             | tr -d '[:space:]')
 
           if [ -z "$ACTUAL" ]; then
-            echo "ERROR: OCI_KEY_CONTENT tidak dapat dibaca sebagai private key."
+            echo "ERROR: Private key tidak dapat dibaca."
             exit 1
           fi
 
           if [ "$ACTUAL" = "$EXPECTED" ]; then
-            echo "OK: Private key cocok dengan OCI_FINGERPRINT."
+            echo "OK: Private key cocok dengan fingerprint."
           else
-            echo "ERROR: OCI_KEY_CONTENT TIDAK cocok dengan OCI_FINGERPRINT."
+            echo "ERROR: Private key TIDAK cocok dengan fingerprint."
             exit 1
           fi
 
-      # Mencoba membuat Oracle ARM Always Free
+      # TES RESMI MENGGUNAKAN OCI CLI
+      - name: Install OCI CLI
+        run: |
+          python3 -m venv "$RUNNER_TEMP/oci-cli"
+          "$RUNNER_TEMP/oci-cli/bin/pip" install --quiet --upgrade pip
+          "$RUNNER_TEMP/oci-cli/bin/pip" install --quiet oci-cli
+
+      - name: Create OCI CLI Config
+        env:
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+        run: |
+          mkdir -p "$HOME/.oci"
+
+          cat > "$HOME/.oci/config" <<EOF
+          [DEFAULT]
+          user=$OCI_USER_OCID
+          fingerprint=$OCI_FINGERPRINT
+          tenancy=$OCI_TENANCY_OCID
+          region=ap-batam-1
+          key_file=$GITHUB_WORKSPACE/private_key.pem
+          EOF
+
+          chmod 600 "$HOME/.oci/config"
+
+      - name: Test 1 - OCI API Authentication
+        env:
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+        run: |
+          OCI="$RUNNER_TEMP/oci-cli/bin/oci"
+
+          echo "Menguji User OCID + API Key..."
+
+          "$OCI" iam user get \
+            --user-id "$OCI_USER_OCID" \
+            --output json >/dev/null
+
+          echo "SUCCESS: API Key dan User OCID diterima Oracle."
+
+      - name: Test 2 - Compute API Batam
+        env:
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+        run: |
+          OCI="$RUNNER_TEMP/oci-cli/bin/oci"
+
+          echo "Menguji akses Compute di Batam..."
+
+          "$OCI" compute instance list \
+            --compartment-id "$OCI_TENANCY_OCID" \
+            --region ap-batam-1 \
+            --limit 1 \
+            --output json >/dev/null
+
+          echo "SUCCESS: Compute API Batam dapat diakses."
+
       - name: Execute OCI ARM Check
         env:
           OCI_REGION: ap-batam-1
@@ -117,7 +165,6 @@ jobs:
           OCI_OCPUS: "1"
           OCI_MEMORY_IN_GBS: "6"
           OCI_MAX_INSTANCES: "1"
-
           OCI_SHAPE: VM.Standard.A1.Flex
 
         run: php index.php
