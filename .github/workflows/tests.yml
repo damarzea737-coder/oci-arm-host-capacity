@@ -34,7 +34,7 @@ jobs:
           OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
           OCI_IMAGE_ID: ocid1.image.oc1.ap-batam-1.aaaaaaaawggpxox66i2n3l5mvy2fvh5i3z762k4d2vzxxd3ezygzgl5i5iqa
           OCI_SSH_PUBLIC_KEY: ~/.ssh/id_rsa.pub
-          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_REGION: ap-batam-1
           OCI_MAX_INSTANCES: 1
           OCI_SHAPE: VM.Standard.A1.Flex
           OCI_OCPUS: ${{ secrets.OCI_OCI_ARM_CAPACITY }}
