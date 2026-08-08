@@ -15,6 +15,11 @@ jobs:
         run: |
           ssh-keygen -t rsa -b 2048 -f ~/.ssh/id_rsa -N ""
 
+      - name: Create OCI Private Key File
+        run: |
+          echo "${{ secrets.OCI_KEY_CONTENT }}" > private_key.pem
+          chmod 600 private_key.pem
+
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
@@ -28,9 +33,7 @@ jobs:
           OCI_USER_ID: ${{ secrets.OCI_USER_OCID }}
           OCI_TENANCY_ID: ${{ secrets.OCI_TENANCY_OCID }}
           OCI_KEY_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
-          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
-          OCI_PRIVATE_KEY_FILENAME: ${{ secrets.OCI_KEY_CONTENT }}
-          OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
+          OCI_PRIVATE_KEY_FILENAME: private_key.pem
           OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
           OCI_IMAGE_ID: ocid1.image.oc1.ap-batam-1.aaaaaaaawggpxox66i2n3l5mvy2fvh5i3z762k4d2vzxxd3ezygzgl5i5iqa
           OCI_SSH_PUBLIC_KEY: ~/.ssh/id_rsa.pub
@@ -39,6 +42,4 @@ jobs:
           OCI_SHAPE: VM.Standard.A1.Flex
           OCI_OCPUS: ${{ secrets.OCI_OCI_ARM_CAPACITY }}
           OCI_MEMORY_IN_GBS: ${{ secrets.OCI_OCI_ARM_MEMORY }}
-          OCI_OCI_ARM_CAPACITY: ${{ secrets.OCI_OCI_ARM_CAPACITY }}
-          OCI_OCI_ARM_MEMORY: ${{ secrets.OCI_OCI_ARM_MEMORY }}
         run: php index.php
