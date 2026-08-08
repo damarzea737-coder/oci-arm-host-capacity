@@ -21,12 +21,14 @@ jobs:
 
       - name: Execute OCI ARM Check
         env:
-          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
-          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_USER_ID: ${{ secrets.OCI_USER_OCID }}
+          OCI_TENANCY_ID: ${{ secrets.OCI_TENANCY_OCID }}
           OCI_REGION: ${{ secrets.OCI_REGION }}
           OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
           OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
           OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
-          OCI_OCI_ARM_CAPACITY: ${{ secrets.OCI_OCI_ARM_CAPACITY }}
-          OCI_OCI_ARM_MEMORY: ${{ secrets.OCI_OCI_ARM_MEMORY }}
+          OCI_MAX_INSTANCES: 1
+          OCI_SHAPE: VM.Standard.A1.Flex
+          OCI_OCPUS: ${{ secrets.OCI_OCI_ARM_CAPACITY }}
+          OCI_MEMORY_IN_GBS: ${{ secrets.OCI_OCI_ARM_MEMORY }}
         run: php index.php
