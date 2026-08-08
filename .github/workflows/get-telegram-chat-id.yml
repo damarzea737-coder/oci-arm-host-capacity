@@ -16,27 +16,45 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ============================================================
+      # 1. AMBIL LOG WORKFLOW ORACLE
+      # ============================================================
+
       - name: Get Oracle Log
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
+          set -e
+
           mkdir -p "$RUNNER_TEMP/logs"
 
-          curl -L -sS \
+          echo "Mengambil log Oracle run #${RUN_ID}..."
+
+          curl -L --fail --silent --show-error \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/logs" \
             -o "$RUNNER_TEMP/logs.zip"
 
-          unzip -q "$RUNNER_TEMP/logs.zip" \
+          unzip -q \
+            "$RUNNER_TEMP/logs.zip" \
             -d "$RUNNER_TEMP/logs"
+
+          : > "$RUNNER_TEMP/oracle.log"
 
           find "$RUNNER_TEMP/logs" \
             -type f \
             -name "*.txt" \
             -exec cat {} \; \
-            > "$RUNNER_TEMP/oracle.log"
+            >> "$RUNNER_TEMP/oracle.log"
+
+          echo "Log Oracle berhasil diambil."
+
+      # ============================================================
+      # 2. ANALISIS + KIRIM TELEGRAM
+      # ============================================================
 
       - name: Send Telegram Report
         env:
@@ -45,92 +63,227 @@ jobs:
           RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
           RUN_RESULT: ${{ github.event.workflow_run.conclusion }}
         run: |
+          set -e
+
           LOG="$RUNNER_TEMP/oracle.log"
 
+          # --------------------------------------------------------
+          # FUNGSI KIRIM TELEGRAM
+          # --------------------------------------------------------
+
           send_message() {
-            curl -sS -X POST \
+
+            if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+              echo "ERROR: TELEGRAM_BOT_TOKEN kosong."
+              exit 1
+            fi
+
+            if [ -z "$TELEGRAM_CHAT_ID" ]; then
+              echo "ERROR: TELEGRAM_CHAT_ID kosong."
+              exit 1
+            fi
+
+            if ! curl --fail --silent --show-error \
+              -X POST \
               "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -d "chat_id=${TELEGRAM_CHAT_ID}" \
               --data-urlencode "text=$1" \
               >/dev/null
+            then
+              echo "WARNING: Gagal mengirim Telegram."
+              return 1
+            fi
+
+            echo "Telegram berhasil dikirim."
           }
 
-          # SERVER BERHASIL - LANGSUNG KIRIM
-          if grep -q "ORACLE A1 BERHASIL RUNNING" "$LOG"; then
+          # ========================================================
+          # 3. JIKA SERVER A1 BARU BERHASIL RUNNING
+          # KIRIM LANGSUNG, TIDAK MENUNGGU 30 MENIT
+          # ========================================================
 
-            INSTANCE=$(grep "Instance   :" "$LOG" | tail -1 | sed 's/^.*Instance   : //')
-            PUBLIC_IP=$(grep "Public IP  :" "$LOG" | tail -1 | sed 's/^.*Public IP  : //')
-            PRIVATE_IP=$(grep "Private IP :" "$LOG" | tail -1 | sed 's/^.*Private IP : //')
+          if grep -qE \
+            'Z ORACLE A1 BERHASIL RUNNING$' "$LOG"
+          then
+
+            INSTANCE=$(
+              grep -E \
+                'Z Instance[[:space:]]+:' "$LOG" \
+              | tail -1 \
+              | sed -E \
+                's/^.*Z Instance[[:space:]]+:[[:space:]]*//'
+            )
+
+            PUBLIC_IP=$(
+              grep -E \
+                'Z Public IP[[:space:]]+:' "$LOG" \
+              | tail -1 \
+              | sed -E \
+                's/^.*Z Public IP[[:space:]]+:[[:space:]]*//'
+            )
+
+            PRIVATE_IP=$(
+              grep -E \
+                'Z Private IP[[:space:]]+:' "$LOG" \
+              | tail -1 \
+              | sed -E \
+                's/^.*Z Private IP[[:space:]]+:[[:space:]]*//'
+            )
+
+            if [ -z "$INSTANCE" ]; then
+              INSTANCE="berhasil dibuat"
+            fi
+
+            if [ -z "$PUBLIC_IP" ]; then
+              PUBLIC_IP="belum tersedia"
+            fi
+
+            if [ -z "$PRIVATE_IP" ]; then
+              PRIVATE_IP="belum tersedia"
+            fi
 
             MSG=$(printf '%s\n' \
               "🎉 ORACLE A1 BERHASIL!" \
               "" \
-              "Percobaan: #${RUN_NUMBER}" \
-              "Region: Batam" \
-              "Shape: VM.Standard.A1.Flex" \
-              "CPU: 1 OCPU" \
-              "RAM: 6 GB" \
+              "Percobaan workflow: #${RUN_NUMBER}" \
               "" \
-              "Instance: ${INSTANCE}" \
-              "Public IP: ${PUBLIC_IP}" \
-              "Private IP: ${PRIVATE_IP}" \
+              "🌏 Region: Batam" \
+              "🖥 Shape: VM.Standard.A1.Flex" \
+              "⚙️ CPU: 1 OCPU" \
+              "💾 RAM: 6 GB" \
               "" \
-              "✅ Server sudah RUNNING.")
+              "📛 Instance:" \
+              "${INSTANCE}" \
+              "" \
+              "🌐 Public IP:" \
+              "${PUBLIC_IP}" \
+              "" \
+              "🔒 Private IP:" \
+              "${PRIVATE_IP}" \
+              "" \
+              "✅ Server sudah RUNNING." \
+              "✅ Pencarian A1 berhasil."
+            )
 
-            send_message "$MSG"
+            send_message "$MSG" || true
+
+            echo "A1 berhasil. Notifikasi sukses selesai."
+
             exit 0
           fi
 
-          # KALAU A1 SUDAH ADA, JANGAN SPAM
-          if grep -q "A1 SUDAH ADA" "$LOG"; then
-            echo "A1 sudah ada. Telegram tidak dikirim lagi."
+          # ========================================================
+          # 4. JIKA A1 SUDAH ADA
+          # JANGAN KIRIM PESAN BERULANG SETIAP 10 MENIT
+          # ========================================================
+
+          if grep -qE \
+            'Z A1 SUDAH ADA$' "$LOG"
+          then
+
+            echo "A1 sudah ada."
+            echo "Tidak mengirim Telegram lagi agar tidak spam."
+
             exit 0
           fi
 
-          # ERROR SERIUS LANGSUNG KIRIM
+          # ========================================================
+          # 5. ERROR SERIUS WORKFLOW
+          # KIRIM LANGSUNG
+          # ========================================================
+
           if [ "$RUN_RESULT" != "success" ]; then
 
             MSG=$(printf '%s\n' \
-              "❌ ORACLE WORKFLOW ERROR" \
+              "❌ ORACLE A1 WORKFLOW ERROR" \
               "" \
-              "Percobaan: #${RUN_NUMBER}" \
+              "Percobaan workflow: #${RUN_NUMBER}" \
               "Status: ${RUN_RESULT}" \
               "" \
-              "Workflow perlu diperiksa.")
+              "⚠️ Workflow Oracle mengalami error." \
+              "Silakan periksa GitHub Actions."
+            )
 
-            send_message "$MSG"
+            send_message "$MSG" || true
+
             exit 0
           fi
 
-          # LAPORAN CUMA SETIAP 3 PERCOBAAN
-          # kira-kira setiap 30 menit
-          if [ $((RUN_NUMBER % 3)) -ne 0 ]; then
-            echo "Belum waktunya laporan Telegram."
+          # ========================================================
+          # 6. LAPORAN RUTIN SETIAP 3 PERCOBAAN
+          #
+          # Oracle target: setiap 10 menit
+          # Telegram: setiap ±30 menit
+          # ========================================================
+
+          REMAINDER=$((RUN_NUMBER % 3))
+
+          if [ "$REMAINDER" -ne 0 ]; then
+
+            echo "Percobaan #${RUN_NUMBER}"
+            echo "Belum jadwal laporan Telegram."
+            echo "Laporan rutin dikirim setiap 3 percobaan."
+
             exit 0
           fi
 
-          STATUS="🔄 A1 belum didapat."
+          # ========================================================
+          # 7. DETEKSI KONDISI ORACLE
+          # ========================================================
 
-          if grep -q "ORACLE RATE LIMIT" "$LOG"; then
-            STATUS="⏳ Oracle rate limit 429."
-          elif grep -q "STOK A1 BATAM MASIH HABIS" "$LOG"; then
-            STATUS="⏳ Kapasitas A1 Batam masih habis."
-          elif grep -q "KONEKSI TIMEOUT" "$LOG"; then
-            STATUS="⚠️ Koneksi Oracle timeout."
+          STATUS="🔄 A1 belum berhasil didapat."
+
+          if grep -qE \
+            'Z ORACLE RATE LIMIT$' "$LOG"
+          then
+
+            STATUS="⏳ Oracle sedang rate limit (429)."
+
+          elif grep -qE \
+            'Z STOK A1 BATAM MASIH HABIS$' "$LOG"
+          then
+
+            STATUS="⏳ Kapasitas Oracle A1 Batam masih habis."
+
+          elif grep -qE \
+            'Z KONEKSI TIMEOUT$' "$LOG"
+          then
+
+            STATUS="⚠️ Koneksi ke Oracle sempat timeout."
+
+          elif grep -qE \
+            'Z BELUM ADA A1$' "$LOG"
+          then
+
+            STATUS="🔄 A1 belum didapat, pencarian masih berjalan."
+
           fi
+
+          # ========================================================
+          # 8. KIRIM LAPORAN RUTIN
+          # ========================================================
 
           MSG=$(printf '%s\n' \
             "🤖 ORACLE A1 MONITOR" \
             "" \
             "Sudah sampai percobaan: #${RUN_NUMBER}" \
+            "" \
             "${STATUS}" \
             "" \
-            "Target percobaan: setiap 10 menit" \
-            "Laporan Telegram: setiap ±30 menit" \
+            "⏱ Target percobaan Oracle:" \
+            "setiap 10 menit" \
             "" \
-            "Region: Batam" \
-            "Target: 1 OCPU / 6 GB" \
+            "📨 Laporan Telegram:" \
+            "setiap ±30 menit" \
             "" \
-            "Bot akan langsung memberi tahu kalau A1 berhasil.")
+            "🌏 Region: Batam" \
+            "🖥 Shape: VM.Standard.A1.Flex" \
+            "⚙️ Target: 1 OCPU" \
+            "💾 RAM: 6 GB" \
+            "" \
+            "Bot akan langsung memberi tahu jika A1 berhasil."
+          )
 
-          send_message "$MSG"
+          send_message "$MSG" || true
+
+          echo "Laporan Oracle #${RUN_NUMBER} selesai."
