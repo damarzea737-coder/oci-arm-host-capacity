@@ -1,9 +1,82 @@
+name: Tests
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/10 * * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+
+      - name: Install Dependencies
+        run: composer install --prefer-dist --no-progress
+
+      # Mengecek semua GitHub Secrets tersedia.
+      # Tidak menampilkan isi secret ke log.
+      - name: Validate Required Secrets
+        env:
+          OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
+          OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
+        run: |
+          FAILED=0
+
+          for VAR in \
+            OCI_KEY_CONTENT \
+            OCI_USER_OCID \
+            OCI_TENANCY_OCID \
+            OCI_FINGERPRINT \
+            OCI_SUBNET_ID \
+            OCI_SSH_PUBLIC_KEY
+          do
+            if [ -z "${!VAR}" ]; then
+              echo "ERROR: $VAR kosong atau belum dibuat."
+              FAILED=1
+            else
+              echo "OK: $VAR tersedia."
+            fi
+          done
+
+          if [ "$FAILED" -ne 0 ]; then
+            exit 1
+          fi
+
+      # Membuat file private API signing key Oracle
+      - name: Create OCI Private Key File
+        env:
+          OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
+        run: |
+          printf '%s\n' "$OCI_KEY_CONTENT" > "$GITHUB_WORKSPACE/private_key.pem"
+          chmod 600 "$GITHUB_WORKSPACE/private_key.pem"
+
+      # Memastikan private key .pem benar-benar pasangan
+      # dari fingerprint API key Oracle yang kita masukkan.
       - name: Validate OCI API Key Pair
         env:
           EXPECTED_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
         run: |
-          ACTUAL=$(openssl rsa -pubout -outform DER \
-            -in "$GITHUB_WORKSPACE/private_key.pem" 2>/dev/null \
+          ACTUAL=$(openssl rsa \
+            -pubout \
+            -outform DER \
+            -in "$GITHUB_WORKSPACE/private_key.pem" \
+            2>/dev/null \
             | openssl md5 -c \
             | sed 's/^.*= //' \
             | tr '[:upper:]' '[:lower:]' \
@@ -13,9 +86,38 @@
             | tr '[:upper:]' '[:lower:]' \
             | tr -d '[:space:]')
 
-          if [ "$ACTUAL" = "$EXPECTED" ]; then
-            echo "OK: Private key matches OCI fingerprint."
-          else
-            echo "ERROR: OCI_KEY_CONTENT does NOT match OCI_FINGERPRINT."
+          if [ -z "$ACTUAL" ]; then
+            echo "ERROR: OCI_KEY_CONTENT tidak dapat dibaca sebagai private key."
             exit 1
           fi
+
+          if [ "$ACTUAL" = "$EXPECTED" ]; then
+            echo "OK: Private key cocok dengan OCI_FINGERPRINT."
+          else
+            echo "ERROR: OCI_KEY_CONTENT TIDAK cocok dengan OCI_FINGERPRINT."
+            exit 1
+          fi
+
+      # Mencoba membuat Oracle ARM Always Free
+      - name: Execute OCI ARM Check
+        env:
+          OCI_REGION: ap-batam-1
+
+          OCI_USER_ID: ${{ secrets.OCI_USER_OCID }}
+          OCI_TENANCY_ID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_KEY_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_PRIVATE_KEY_FILENAME: ${{ github.workspace }}/private_key.pem
+
+          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+
+          OCI_IMAGE_ID: ocid1.image.oc1.ap-batam-1.aaaaaaaawggpxox66i2n3l5mvy2fvh5i3z762k4d2vzxxd3ezygzgl5i5iqa
+
+          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
+
+          OCI_OCPUS: "1"
+          OCI_MEMORY_IN_GBS: "6"
+          OCI_MAX_INSTANCES: "1"
+
+          OCI_SHAPE: VM.Standard.A1.Flex
+
+        run: php index.php
