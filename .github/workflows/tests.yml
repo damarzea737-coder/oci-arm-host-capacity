@@ -23,6 +23,11 @@ jobs:
       OCI_SHAPE: VM.Standard.A1.Flex
 
     steps:
+
+      # ============================================================
+      # 1. VALIDASI SECRET
+      # ============================================================
+
       - name: Validate Secrets
         env:
           OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
@@ -54,6 +59,10 @@ jobs:
             exit 1
           fi
 
+      # ============================================================
+      # 2. BUAT CREDENTIAL OCI
+      # ============================================================
+
       - name: Create OCI Credentials
         env:
           OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
@@ -64,7 +73,9 @@ jobs:
         run: |
           mkdir -p "$HOME/.oci"
 
-          printf '%s\n' "$OCI_KEY_CONTENT" > "$HOME/.oci/oci_api_key.pem"
+          printf '%s\n' "$OCI_KEY_CONTENT" \
+            > "$HOME/.oci/oci_api_key.pem"
+
           chmod 600 "$HOME/.oci/oci_api_key.pem"
 
           cat > "$HOME/.oci/config" <<EOF
@@ -78,8 +89,14 @@ jobs:
 
           chmod 600 "$HOME/.oci/config"
 
-          printf '%s\n' "$OCI_SSH_PUBLIC_KEY" > "$HOME/.oci/server_ssh_key.pub"
+          printf '%s\n' "$OCI_SSH_PUBLIC_KEY" \
+            > "$HOME/.oci/server_ssh_key.pub"
+
           chmod 600 "$HOME/.oci/server_ssh_key.pub"
+
+      # ============================================================
+      # 3. INSTALL OCI CLI
+      # ============================================================
 
       - name: Install OCI CLI
         run: |
@@ -91,7 +108,12 @@ jobs:
           "$RUNNER_TEMP/oci-cli/bin/pip" \
             install --quiet oci-cli
 
+          echo "OCI CLI version:"
           "$RUNNER_TEMP/oci-cli/bin/oci" --version
+
+      # ============================================================
+      # 4. TEST KONEKSI ORACLE
+      # ============================================================
 
       - name: Verify OCI Connection
         env:
@@ -105,15 +127,25 @@ jobs:
 
           "$OCI" iam user get \
             --user-id "$OCI_USER_OCID" \
-            --output json >/dev/null
+            --output json \
+            >/dev/null
+
+          echo "API authentication OK."
+
+          echo "Checking Compute API Batam..."
 
           "$OCI" compute instance list \
             --compartment-id "$OCI_TENANCY_OCID" \
             --region "$OCI_REGION" \
             --limit 1 \
-            --output json >/dev/null
+            --output json \
+            >/dev/null
 
           echo "SUCCESS: Oracle API dan Compute Batam dapat diakses."
+
+      # ============================================================
+      # 5. CEK APAKAH SUDAH ADA A1
+      # ============================================================
 
       - name: Check Existing A1 Instance
         id: existing
@@ -123,43 +155,46 @@ jobs:
         run: |
           OCI="$RUNNER_TEMP/oci-cli/bin/oci"
 
-          "$OCI" compute instance list \
-            --compartment-id "$OCI_TENANCY_OCID" \
-            --region "$OCI_REGION" \
-            --all \
-            --output json > "$RUNNER_TEMP/instances.json"
+          echo "Mengecek apakah A1 sudah ada..."
 
-          COUNT=$(python3 - <<'PY'
-          import json
-          import os
-
-          path = os.path.join(
-              os.environ["RUNNER_TEMP"],
-              "instances.json"
+          COUNT=$(
+            "$OCI" compute instance list \
+              --compartment-id "$OCI_TENANCY_OCID" \
+              --region "$OCI_REGION" \
+              --limit 100 \
+              --query 'length(data[?shape==`"VM.Standard.A1.Flex"` && "lifecycle-state"!=`"TERMINATED"`])' \
+              --raw-output
           )
 
-          with open(path, "r") as f:
-              data = json.load(f).get("data", [])
-
-          instances = [
-              x for x in data
-              if x.get("shape") == "VM.Standard.A1.Flex"
-              and x.get("lifecycle-state") != "TERMINATED"
-          ]
-
-          print(len(instances))
-          PY
-          )
+          if [ -z "$COUNT" ] || [ "$COUNT" = "null" ]; then
+            COUNT=0
+          fi
 
           echo "Jumlah A1 aktif/provisioning: $COUNT"
 
           if [ "$COUNT" -ge 1 ]; then
+
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "A1 sudah ada. Tidak membuat instance kedua."
+
+            echo "========================================"
+            echo "A1 SUDAH ADA"
+            echo "Tidak akan membuat instance kedua."
+            echo "========================================"
+
           else
+
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Belum ada A1. Akan mencoba membuat."
+
+            echo "========================================"
+            echo "BELUM ADA A1"
+            echo "Akan mencoba membuat instance."
+            echo "========================================"
+
           fi
+
+      # ============================================================
+      # 6. AMBIL AVAILABILITY DOMAIN
+      # ============================================================
 
       - name: Get Availability Domain
         id: ad
@@ -169,6 +204,8 @@ jobs:
           SUPPRESS_LABEL_WARNING: "True"
         run: |
           OCI="$RUNNER_TEMP/oci-cli/bin/oci"
+
+          echo "Mencari Availability Domain..."
 
           AD=$(
             "$OCI" iam availability-domain list \
@@ -183,8 +220,14 @@ jobs:
             exit 1
           fi
 
-          echo "Availability Domain ditemukan."
+          echo "Availability Domain ditemukan:"
+          echo "$AD"
+
           echo "ad=$AD" >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # 7. COBA BUAT A1
+      # ============================================================
 
       - name: Try Create Oracle A1
         if: steps.existing.outputs.exists == 'false'
@@ -194,17 +237,24 @@ jobs:
           SUPPRESS_LABEL_WARNING: "True"
         run: |
           OCI="$RUNNER_TEMP/oci-cli/bin/oci"
+
           AD="${{ steps.ad.outputs.ad }}"
 
           NAME="free-a1-$(date +%Y%m%d-%H%M)"
 
+          echo ""
           echo "========================================"
-          echo "Mencoba membuat Oracle A1"
+          echo "MENCOBA MEMBUAT ORACLE A1"
+          echo "========================================"
           echo "Region : $OCI_REGION"
+          echo "AD     : $AD"
           echo "Shape  : $OCI_SHAPE"
           echo "OCPU   : 1"
           echo "RAM    : 6 GB"
+          echo "Boot   : 50 GB"
+          echo "Name   : $NAME"
           echo "========================================"
+          echo ""
 
           set +e
 
@@ -217,7 +267,6 @@ jobs:
             --shape-config '{"ocpus":1,"memoryInGBs":6}' \
             --display-name "$NAME" \
             --ssh-authorized-keys-file "$HOME/.oci/server_ssh_key.pub" \
-            --assign-public-ip true \
             --boot-volume-size-in-gbs 50 \
             --wait-for-state RUNNING \
             --wait-interval-seconds 10 \
@@ -230,37 +279,76 @@ jobs:
 
           set -e
 
+          # ========================================================
+          # JIKA GAGAL
+          # ========================================================
+
           if [ "$STATUS" -ne 0 ]; then
 
             ERROR_TEXT=$(cat "$RUNNER_TEMP/launch-error.txt")
 
+            echo ""
+            echo "Response Oracle:"
             echo "$ERROR_TEXT"
+            echo ""
 
             if echo "$ERROR_TEXT" | grep -qiE \
               'Out of host capacity|Out of capacity'; then
 
-              echo ""
               echo "========================================"
               echo "STOK A1 BATAM MASIH HABIS"
-              echo "Workflow akan mencoba lagi pada jadwal berikutnya."
               echo "========================================"
+              echo ""
+              echo "Tidak ada kesalahan konfigurasi."
+              echo "Workflow akan mencoba lagi otomatis."
+              echo ""
 
               exit 0
+
             fi
 
-            echo ""
-            echo "ERROR bukan masalah kapasitas."
+            if echo "$ERROR_TEXT" | grep -qi \
+              'LimitExceeded'; then
+
+              echo "========================================"
+              echo "LIMIT ORACLE SUDAH TERCAPAI"
+              echo "========================================"
+
+              exit 1
+
+            fi
+
+            if echo "$ERROR_TEXT" | grep -qi \
+              'InvalidParameter'; then
+
+              echo "========================================"
+              echo "ADA PARAMETER ORACLE YANG TIDAK VALID"
+              echo "Kemungkinan IMAGE / SUBNET / SHAPE."
+              echo "========================================"
+
+              exit 1
+
+            fi
+
+            echo "========================================"
+            echo "ERROR BUKAN MASALAH KAPASITAS"
+            echo "========================================"
+
             exit "$STATUS"
+
           fi
+
+          # ========================================================
+          # BERHASIL
+          # ========================================================
 
           echo ""
           echo "========================================"
           echo "SERVER BERHASIL DIBUAT!"
           echo "========================================"
 
-          cat "$RUNNER_TEMP/launch.json"
-
-          INSTANCE_ID=$(python3 - <<'PY'
+          INSTANCE_ID=$(
+            python3 - <<'PY'
           import json
           import os
 
@@ -276,8 +364,16 @@ jobs:
           PY
           )
 
-          echo ""
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "Instance dibuat tetapi OCID tidak ditemukan."
+            exit 1
+          fi
+
           echo "Instance OCID berhasil didapat."
+
+          # ========================================================
+          # AMBIL VNIC
+          # ========================================================
 
           VNIC_ID=$(
             "$OCI" compute vnic-attachment list \
@@ -287,6 +383,12 @@ jobs:
               --raw-output
           )
 
+          echo "VNIC berhasil ditemukan."
+
+          # ========================================================
+          # AMBIL PUBLIC IP
+          # ========================================================
+
           PUBLIC_IP=$(
             "$OCI" network vnic get \
               --vnic-id "$VNIC_ID" \
@@ -294,8 +396,21 @@ jobs:
               --raw-output
           )
 
+          PRIVATE_IP=$(
+            "$OCI" network vnic get \
+              --vnic-id "$VNIC_ID" \
+              --query 'data."private-ip"' \
+              --raw-output
+          )
+
           echo ""
           echo "========================================"
-          echo "ORACLE A1 BERHASIL RUNNING"
-          echo "Public IP: $PUBLIC_IP"
+          echo "🎉 ORACLE A1 BERHASIL RUNNING"
+          echo "========================================"
+          echo "Instance : $NAME"
+          echo "OCPU     : 1"
+          echo "RAM      : 6 GB"
+          echo "Shape    : $OCI_SHAPE"
+          echo "Private IP: $PRIVATE_IP"
+          echo "Public IP : $PUBLIC_IP"
           echo "========================================"
