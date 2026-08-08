@@ -15,7 +15,7 @@ concurrency:
 jobs:
   create-a1:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
 
     env:
       OCI_REGION: ap-batam-1
@@ -25,6 +25,7 @@ jobs:
       OCI_BOOT_GB: "50"
 
     steps:
+
       # ============================================================
       # 1. VALIDASI SECRET
       # ============================================================
@@ -61,7 +62,7 @@ jobs:
           fi
 
       # ============================================================
-      # 2. BUAT CREDENTIAL OCI
+      # 2. BUAT OCI CONFIG
       # ============================================================
 
       - name: Create OCI Credentials
@@ -109,11 +110,11 @@ jobs:
           "$RUNNER_TEMP/oci-cli/bin/pip" \
             install --quiet oci-cli
 
-          echo "OCI CLI version:"
+          echo "OCI CLI:"
           "$RUNNER_TEMP/oci-cli/bin/oci" --version
 
       # ============================================================
-      # 4. TEST KONEKSI
+      # 4. TEST AUTH
       # ============================================================
 
       - name: Verify OCI Connection
@@ -129,6 +130,8 @@ jobs:
           "$OCI" iam user get \
             --user-id "$OCI_USER_OCID" \
             --output json \
+            --connection-timeout 30 \
+            --read-timeout 60 \
             >/dev/null
 
           echo "Authentication OK."
@@ -138,6 +141,8 @@ jobs:
             --region "$OCI_REGION" \
             --limit 1 \
             --output json \
+            --connection-timeout 30 \
+            --read-timeout 60 \
             >/dev/null
 
           echo "Compute API Batam OK."
@@ -156,18 +161,14 @@ jobs:
 
           echo "Checking subnet..."
 
-          "$OCI" network subnet get \
-            --subnet-id "$OCI_SUBNET_ID" \
-            --region "$OCI_REGION" \
-            --output json \
-            >/dev/null
-
           SUBNET_NAME=$(
             "$OCI" network subnet get \
               --subnet-id "$OCI_SUBNET_ID" \
               --region "$OCI_REGION" \
               --query 'data."display-name"' \
-              --raw-output
+              --raw-output \
+              --connection-timeout 30 \
+              --read-timeout 60
           )
 
           SUBNET_AD=$(
@@ -175,7 +176,9 @@ jobs:
               --subnet-id "$OCI_SUBNET_ID" \
               --region "$OCI_REGION" \
               --query 'data."availability-domain"' \
-              --raw-output
+              --raw-output \
+              --connection-timeout 30 \
+              --read-timeout 60 2>/dev/null || true
           )
 
           PRIVATE_SUBNET=$(
@@ -183,7 +186,9 @@ jobs:
               --subnet-id "$OCI_SUBNET_ID" \
               --region "$OCI_REGION" \
               --query 'data."prohibit-public-ip-on-vnic"' \
-              --raw-output
+              --raw-output \
+              --connection-timeout 30 \
+              --read-timeout 60
           )
 
           if [ "$SUBNET_AD" = "None" ] || \
@@ -191,20 +196,19 @@ jobs:
             SUBNET_AD=""
           fi
 
-          echo "Subnet ditemukan: $SUBNET_NAME"
+          echo "Subnet: $SUBNET_NAME"
           echo "Private subnet: $PRIVATE_SUBNET"
 
-          if [ -n "$SUBNET_AD" ]; then
-            echo "Subnet AD: $SUBNET_AD"
+          if [ -z "$SUBNET_AD" ]; then
+            echo "Subnet regional."
           else
-            echo "Subnet bersifat regional."
+            echo "Subnet AD: $SUBNET_AD"
           fi
 
           echo "subnet_ad=$SUBNET_AD" >> "$GITHUB_OUTPUT"
-          echo "private_subnet=$PRIVATE_SUBNET" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 6. CEK INSTANCE A1 YANG SUDAH ADA
+      # 6. CEK A1 YANG SUDAH ADA
       # ============================================================
 
       - name: Check Existing A1 Instance
@@ -221,7 +225,9 @@ jobs:
               --region "$OCI_REGION" \
               --limit 100 \
               --query 'length(data[?shape==`"VM.Standard.A1.Flex"` && "lifecycle-state"!=`"TERMINATED"`])' \
-              --raw-output
+              --raw-output \
+              --connection-timeout 30 \
+              --read-timeout 60
           )
 
           if [ -z "$COUNT" ] || [ "$COUNT" = "null" ]; then
@@ -235,19 +241,19 @@ jobs:
 
             echo "========================================"
             echo "A1 SUDAH ADA"
-            echo "Tidak membuat instance baru."
+            echo "Tidak membuat instance kedua."
             echo "========================================"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
 
             echo "========================================"
             echo "BELUM ADA A1"
-            echo "Workflow akan mencoba membuat."
+            echo "Akan mencoba mendapatkan kapasitas."
             echo "========================================"
           fi
 
       # ============================================================
-      # 7. PILIH AVAILABILITY DOMAIN
+      # 7. AVAILABILITY DOMAIN
       # ============================================================
 
       - name: Get Availability Domain
@@ -262,21 +268,17 @@ jobs:
           SUBNET_AD="${{ steps.subnet.outputs.subnet_ad }}"
 
           if [ -n "$SUBNET_AD" ]; then
-
             AD="$SUBNET_AD"
-
-            echo "Menggunakan AD dari subnet."
-
           else
-
             AD=$(
               "$OCI" iam availability-domain list \
                 --compartment-id "$OCI_TENANCY_OCID" \
                 --region "$OCI_REGION" \
                 --query 'data[0].name' \
-                --raw-output
+                --raw-output \
+                --connection-timeout 30 \
+                --read-timeout 60
             )
-
           fi
 
           if [ -z "$AD" ] || [ "$AD" = "null" ]; then
@@ -285,11 +287,10 @@ jobs:
           fi
 
           echo "Availability Domain: $AD"
-
           echo "ad=$AD" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 8. CARI IMAGE ARM TERBARU YANG KOMPATIBEL
+      # 8. CARI IMAGE ARM TERBARU
       # ============================================================
 
       - name: Get Latest Compatible Oracle Linux Image
@@ -301,7 +302,7 @@ jobs:
         run: |
           OCI="$RUNNER_TEMP/oci-cli/bin/oci"
 
-          echo "Mencari Oracle Linux terbaru untuk $OCI_SHAPE..."
+          echo "Mencari image ARM terbaru..."
 
           IMAGE_ID=$(
             "$OCI" compute image list \
@@ -314,14 +315,15 @@ jobs:
               --sort-order DESC \
               --limit 1 \
               --query 'data[0].id' \
-              --raw-output
+              --raw-output \
+              --connection-timeout 30 \
+              --read-timeout 60
           )
 
           if [ -z "$IMAGE_ID" ] || \
              [ "$IMAGE_ID" = "null" ] || \
              [ "$IMAGE_ID" = "None" ]; then
-
-            echo "ERROR: Image Oracle Linux kompatibel A1 tidak ditemukan."
+            echo "ERROR: Image ARM kompatibel tidak ditemukan."
             exit 1
           fi
 
@@ -330,17 +332,18 @@ jobs:
               --image-id "$IMAGE_ID" \
               --region "$OCI_REGION" \
               --query 'data."display-name"' \
-              --raw-output
+              --raw-output \
+              --connection-timeout 30 \
+              --read-timeout 60
           )
 
-          echo "Image ditemukan:"
-          echo "$IMAGE_NAME"
+          echo "Image: $IMAGE_NAME"
 
           echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
           echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 9. COBA BUAT INSTANCE
+      # 9. LAUNCH A1
       # ============================================================
 
       - name: Try Create Oracle A1
@@ -356,7 +359,7 @@ jobs:
           IMAGE_ID="${{ steps.image.outputs.image_id }}"
           IMAGE_NAME="${{ steps.image.outputs.image_name }}"
 
-          NAME="free-a1-$(date +%Y%m%d-%H%M)"
+          NAME="free-a1-$(date +%Y%m%d-%H%M%S)"
 
           echo ""
           echo "========================================"
@@ -373,6 +376,11 @@ jobs:
           echo "========================================"
           echo ""
 
+          # --------------------------------------------------------
+          # LAUNCH TANPA --wait-for-state
+          # Supaya timeout polling tidak dianggap launch gagal.
+          # --------------------------------------------------------
+
           set +e
 
           "$OCI" compute instance launch \
@@ -385,10 +393,10 @@ jobs:
             --display-name "$NAME" \
             --ssh-authorized-keys-file "$HOME/.oci/server_ssh_key.pub" \
             --boot-volume-size-in-gbs "$OCI_BOOT_GB" \
-            --wait-for-state RUNNING \
-            --wait-interval-seconds 10 \
-            --max-wait-seconds 600 \
             --output json \
+            --connection-timeout 30 \
+            --read-timeout 180 \
+            --max-retries 3 \
             > "$RUNNER_TEMP/launch.json" \
             2> "$RUNNER_TEMP/launch-error.txt"
 
@@ -396,9 +404,37 @@ jobs:
 
           set -e
 
-          # ========================================================
-          # ERROR HANDLER
-          # ========================================================
+          INSTANCE_ID=""
+
+          # --------------------------------------------------------
+          # JIKA POST LAUNCH SUKSES
+          # --------------------------------------------------------
+
+          if [ "$STATUS" -eq 0 ]; then
+
+            INSTANCE_ID=$(
+              python3 - <<'PY'
+          import json
+          import os
+
+          path = os.path.join(
+              os.environ["RUNNER_TEMP"],
+              "launch.json"
+          )
+
+          with open(path, "r") as f:
+              data = json.load(f)
+
+          print(data.get("data", {}).get("id", ""))
+          PY
+            )
+
+            echo "Launch request diterima Oracle."
+          fi
+
+          # --------------------------------------------------------
+          # JIKA LAUNCH ERROR
+          # --------------------------------------------------------
 
           if [ "$STATUS" -ne 0 ]; then
 
@@ -409,28 +445,84 @@ jobs:
             echo "$ERROR_TEXT"
             echo ""
 
+            # ---------------- OUT OF CAPACITY ----------------
+
             if echo "$ERROR_TEXT" | grep -qiE \
               'Out of host capacity|Out of capacity'; then
 
               echo "========================================"
               echo "STOK A1 BATAM MASIH HABIS"
               echo "========================================"
-              echo ""
-              echo "Konfigurasi sudah berhasil."
-              echo "Workflow akan mencoba lagi otomatis."
-              echo ""
-
+              echo "Akan dicoba lagi otomatis."
               exit 0
             fi
+
+            # ---------------- RATE LIMIT ----------------
 
             if echo "$ERROR_TEXT" | grep -qiE \
               'TooManyRequests|429'; then
 
-              echo "Oracle sedang membatasi request."
-              echo "Akan dicoba kembali pada jadwal berikutnya."
-
+              echo "========================================"
+              echo "ORACLE RATE LIMIT"
+              echo "========================================"
+              echo "Akan dicoba lagi otomatis."
               exit 0
             fi
+
+            # ---------------- TIMEOUT ----------------
+
+            if echo "$ERROR_TEXT" | grep -qiE \
+              'timed out|timeout|connection.*timed'; then
+
+              echo "========================================"
+              echo "KONEKSI TIMEOUT"
+              echo "Mengecek apakah request tadi sebenarnya berhasil..."
+              echo "========================================"
+
+              for TRY in 1 2 3 4; do
+
+                sleep 15
+
+                echo "Pengecekan instance setelah timeout: $TRY/4"
+
+                set +e
+
+                INSTANCE_ID=$(
+                  "$OCI" compute instance list \
+                    --compartment-id "$OCI_TENANCY_OCID" \
+                    --region "$OCI_REGION" \
+                    --display-name "$NAME" \
+                    --query 'data[?@."lifecycle-state"!=`"TERMINATED"`][0].id' \
+                    --raw-output \
+                    --connection-timeout 30 \
+                    --read-timeout 60 \
+                    2>/dev/null
+                )
+
+                CHECK_STATUS=$?
+
+                set -e
+
+                if [ "$CHECK_STATUS" -eq 0 ] && \
+                   [ -n "$INSTANCE_ID" ] && \
+                   [ "$INSTANCE_ID" != "null" ] && \
+                   [ "$INSTANCE_ID" != "None" ]; then
+
+                  echo "Instance ternyata BERHASIL dibuat meskipun launch timeout."
+                  break
+                fi
+
+                INSTANCE_ID=""
+              done
+
+              if [ -z "$INSTANCE_ID" ]; then
+                echo "Instance belum ditemukan setelah timeout."
+                echo "Workflow berikutnya akan mencoba lagi."
+                exit 0
+              fi
+            fi
+
+            # ---------------- LIMIT ----------------
 
             if echo "$ERROR_TEXT" | grep -qi \
               'LimitExceeded'; then
@@ -438,9 +530,10 @@ jobs:
               echo "========================================"
               echo "LIMIT RESOURCE ORACLE TERCAPAI"
               echo "========================================"
-
               exit 1
             fi
+
+            # ---------------- INVALID ----------------
 
             if echo "$ERROR_TEXT" | grep -qi \
               'InvalidParameter'; then
@@ -448,77 +541,141 @@ jobs:
               echo "========================================"
               echo "PARAMETER INSTANCE TIDAK VALID"
               echo "========================================"
-
               exit 1
             fi
+
+            # ---------------- AUTH / RESOURCE ----------------
 
             if echo "$ERROR_TEXT" | grep -qi \
               'NotAuthorizedOrNotFound'; then
 
               echo "========================================"
-              echo "RESOURCE LAUNCH TIDAK DITEMUKAN / TIDAK DIAKSES"
-              echo "Subnet dan image sudah divalidasi."
-              echo "Lihat Response Oracle di atas."
+              echo "RESOURCE TIDAK DITEMUKAN / TIDAK DIAKSES"
               echo "========================================"
-
               exit 1
             fi
 
-            echo "========================================"
-            echo "ERROR LAIN DARI ORACLE"
-            echo "========================================"
+            # Jika error tadi belum ditangani dan tidak ada instance.
+            if [ -z "$INSTANCE_ID" ]; then
 
-            exit "$STATUS"
+              echo "========================================"
+              echo "ERROR OCI TIDAK DIKENALI"
+              echo "========================================"
+
+              exit "$STATUS"
+            fi
           fi
 
           # ========================================================
-          # BERHASIL
+          # PASTIKAN INSTANCE ID ADA
           # ========================================================
 
-          echo ""
-          echo "========================================"
-          echo "SERVER BERHASIL DIBUAT!"
-          echo "========================================"
-
-          INSTANCE_ID=$(
-            "$OCI" compute instance list \
-              --compartment-id "$OCI_TENANCY_OCID" \
-              --region "$OCI_REGION" \
-              --display-name "$NAME" \
-              --query 'data[0].id' \
-              --raw-output
-          )
-
           if [ -z "$INSTANCE_ID" ] || \
-             [ "$INSTANCE_ID" = "null" ]; then
+             [ "$INSTANCE_ID" = "null" ] || \
+             [ "$INSTANCE_ID" = "None" ]; then
 
-            echo "Instance berhasil dibuat tetapi OCID tidak ditemukan."
+            echo "Tidak mendapat Instance OCID."
             exit 1
           fi
 
+          echo ""
           echo "Instance OCID ditemukan."
+
+          # ========================================================
+          # 10. TUNGGU INSTANCE RUNNING
+          # ========================================================
+
+          STATE=""
+
+          for TRY in $(seq 1 30); do
+
+            set +e
+
+            STATE=$(
+              "$OCI" compute instance get \
+                --instance-id "$INSTANCE_ID" \
+                --region "$OCI_REGION" \
+                --query 'data."lifecycle-state"' \
+                --raw-output \
+                --connection-timeout 30 \
+                --read-timeout 60 \
+                2>/dev/null
+            )
+
+            STATE_STATUS=$?
+
+            set -e
+
+            if [ "$STATE_STATUS" -ne 0 ]; then
+              echo "Check $TRY/30: koneksi sementara gagal."
+              sleep 10
+              continue
+            fi
+
+            echo "Check $TRY/30: $STATE"
+
+            if [ "$STATE" = "RUNNING" ]; then
+              break
+            fi
+
+            if [ "$STATE" = "TERMINATED" ] || \
+               [ "$STATE" = "TERMINATING" ]; then
+
+              echo "Instance gagal provisioning."
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          if [ "$STATE" != "RUNNING" ]; then
+
+            echo "Instance sudah dibuat tetapi belum RUNNING."
+            echo "Run berikutnya akan mendeteksinya dan tidak membuat kedua."
+
+            exit 0
+          fi
+
+          # ========================================================
+          # 11. AMBIL IP ADDRESS
+          # ========================================================
 
           VNIC_ID=$(
             "$OCI" compute vnic-attachment list \
               --compartment-id "$OCI_TENANCY_OCID" \
               --instance-id "$INSTANCE_ID" \
+              --region "$OCI_REGION" \
               --query 'data[0]."vnic-id"' \
-              --raw-output
-          )
-
-          PUBLIC_IP=$(
-            "$OCI" network vnic get \
-              --vnic-id "$VNIC_ID" \
-              --query 'data."public-ip"' \
-              --raw-output
+              --raw-output \
+              --connection-timeout 30 \
+              --read-timeout 60
           )
 
           PRIVATE_IP=$(
             "$OCI" network vnic get \
               --vnic-id "$VNIC_ID" \
+              --region "$OCI_REGION" \
               --query 'data."private-ip"' \
-              --raw-output
+              --raw-output \
+              --connection-timeout 30 \
+              --read-timeout 60
           )
+
+          PUBLIC_IP=$(
+            "$OCI" network vnic get \
+              --vnic-id "$VNIC_ID" \
+              --region "$OCI_REGION" \
+              --query 'data."public-ip"' \
+              --raw-output \
+              --connection-timeout 30 \
+              --read-timeout 60 \
+              2>/dev/null || true
+          )
+
+          if [ "$PUBLIC_IP" = "null" ] || \
+             [ "$PUBLIC_IP" = "None" ]; then
+            PUBLIC_IP=""
+          fi
 
           echo ""
           echo "========================================"
@@ -530,5 +687,11 @@ jobs:
           echo "OCPU       : $OCI_OCPUS"
           echo "RAM        : $OCI_MEMORY_GB GB"
           echo "Private IP : $PRIVATE_IP"
-          echo "Public IP  : $PUBLIC_IP"
+
+          if [ -n "$PUBLIC_IP" ]; then
+            echo "Public IP  : $PUBLIC_IP"
+          else
+            echo "Public IP  : belum tersedia"
+          fi
+
           echo "========================================"
