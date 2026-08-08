@@ -1,413 +1,220 @@
-name: Telegram Control
+name: Telegram Oracle Report
 
 on:
-  workflow_dispatch:
-    inputs:
-      command:
-        description: Telegram control command
-        required: true
-        type: choice
-        options:
-          - status
-          - oracle
-          - github
-          - server
-          - log
+  workflow_run:
+    workflows:
+      - Oracle A1 Auto Provision
+    types:
+      - completed
 
 permissions:
   actions: read
   contents: read
 
 jobs:
-  control:
+  telegram-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    env:
-      COMMAND: ${{ inputs.command }}
-      OCI_REGION: ap-batam-1
-      OCI_SHAPE: VM.Standard.A1.Flex
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
-      OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
-      OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-      OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
 
     steps:
-      - name: Run Telegram Command
+      - name: Get Oracle Log
         env:
           GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
-          set -euo pipefail
+          set -e
+
+          mkdir -p "$RUNNER_TEMP/logs"
+          echo "Mengambil log Oracle run #${RUN_ID}..."
+
+          curl -L --fail --silent --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/logs" \
+            -o "$RUNNER_TEMP/logs.zip"
+
+          unzip -q "$RUNNER_TEMP/logs.zip" -d "$RUNNER_TEMP/logs"
+
+          : > "$RUNNER_TEMP/oracle.log"
+
+          find "$RUNNER_TEMP/logs" \
+            -type f \
+            -name "*.txt" \
+            -exec cat {} \; \
+            >> "$RUNNER_TEMP/oracle.log"
+
+          echo "Log Oracle berhasil diambil."
+
+      - name: Send Telegram Report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          RUN_RESULT: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -e
+
+          LOG="$RUNNER_TEMP/oracle.log"
+          NOW_WIB=$(TZ=Asia/Jakarta date '+%d-%m-%Y %H:%M WIB')
 
           send_message() {
-            local TEXT="$1"
+            TEXT="$1"
 
-            curl --fail --silent --show-error \
+            if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+              echo "ERROR: TELEGRAM_BOT_TOKEN kosong."
+              exit 1
+            fi
+
+            if [ -z "$TELEGRAM_CHAT_ID" ]; then
+              echo "ERROR: TELEGRAM_CHAT_ID kosong."
+              exit 1
+            fi
+
+            REPO_URL="https://github.com/${GITHUB_REPOSITORY}"
+            KEYBOARD=$(printf '{"inline_keyboard":[[{"text":"⚙️ GitHub Actions","url":"%s"}],[{"text":"📦 Repository","url":"%s"}]]}' "$RUN_URL" "$REPO_URL")
+
+            if ! curl --fail --silent --show-error \
               -X POST \
               "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -d "chat_id=${TELEGRAM_CHAT_ID}" \
               --data-urlencode "text=${TEXT}" \
+              --data-urlencode "reply_markup=${KEYBOARD}" \
               >/dev/null
+            then
+              echo "WARNING: Gagal mengirim Telegram."
+              return 1
+            fi
 
             echo "Telegram berhasil dikirim."
           }
 
-          get_run_data() {
-            local WORKFLOW="$1"
+          # A1 BARU BERHASIL RUNNING
+          if grep -qE 'Z ORACLE A1 BERHASIL RUNNING$' "$LOG"; then
 
-            curl --fail --silent --show-error \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/${WORKFLOW}/runs?per_page=1"
-          }
-
-          format_time_wib() {
-            local VALUE="$1"
-
-            if [ -z "$VALUE" ] || [ "$VALUE" = "null" ]; then
-              echo "-"
-            else
-              TZ=Asia/Jakarta date -d "$VALUE" '+%d-%m-%Y %H:%M WIB' 2>/dev/null || echo "$VALUE"
-            fi
-          }
-
-          github_summary() {
-            local ORACLE_JSON TELEGRAM_JSON
-            local ORACLE_NUM ORACLE_STATUS ORACLE_RESULT ORACLE_UPDATED ORACLE_URL
-            local TG_NUM TG_STATUS TG_RESULT TG_UPDATED
-            local AGE_MIN NOW_EPOCH UPDATED_EPOCH HEALTH
-
-            ORACLE_JSON="$(get_run_data "tests.yml")"
-            TELEGRAM_JSON="$(get_run_data "get-telegram-chat-id.yml")"
-
-            ORACLE_NUM="$(echo "$ORACLE_JSON" | jq -r '.workflow_runs[0].run_number // "-"')"
-            ORACLE_STATUS="$(echo "$ORACLE_JSON" | jq -r '.workflow_runs[0].status // "-"')"
-            ORACLE_RESULT="$(echo "$ORACLE_JSON" | jq -r '.workflow_runs[0].conclusion // "-"')"
-            ORACLE_UPDATED="$(echo "$ORACLE_JSON" | jq -r '.workflow_runs[0].updated_at // empty')"
-            ORACLE_URL="$(echo "$ORACLE_JSON" | jq -r '.workflow_runs[0].html_url // "-"')"
-
-            TG_NUM="$(echo "$TELEGRAM_JSON" | jq -r '.workflow_runs[0].run_number // "-"')"
-            TG_STATUS="$(echo "$TELEGRAM_JSON" | jq -r '.workflow_runs[0].status // "-"')"
-            TG_RESULT="$(echo "$TELEGRAM_JSON" | jq -r '.workflow_runs[0].conclusion // "-"')"
-            TG_UPDATED="$(echo "$TELEGRAM_JSON" | jq -r '.workflow_runs[0].updated_at // empty')"
-
-            HEALTH="🟡 BELUM BISA DIPASTIKAN"
-            AGE_MIN="-"
-
-            if [ -n "$ORACLE_UPDATED" ]; then
-              NOW_EPOCH="$(date +%s)"
-              UPDATED_EPOCH="$(date -d "$ORACLE_UPDATED" +%s)"
-              AGE_MIN=$(( (NOW_EPOCH - UPDATED_EPOCH) / 60 ))
-
-              if [ "$ORACLE_STATUS" = "completed" ] && \
-                 [ "$ORACLE_RESULT" = "success" ] && \
-                 [ "$AGE_MIN" -le 30 ]; then
-                HEALTH="🟢 AKTIF / NORMAL"
-              elif [ "$ORACLE_STATUS" = "in_progress" ] || \
-                   [ "$ORACLE_STATUS" = "queued" ]; then
-                HEALTH="🟢 SEDANG BERJALAN"
-              elif [ "$ORACLE_RESULT" = "failure" ]; then
-                HEALTH="🔴 ERROR"
-              elif [ "$AGE_MIN" -gt 30 ]; then
-                HEALTH="🟠 TERLAMBAT / PERLU DICEK"
-              fi
-            fi
-
-            cat <<EOF
-          ⚙️ GITHUB ACTIONS
-
-          Status: ${HEALTH}
-
-          ☁️ Oracle workflow
-          Run: #${ORACLE_NUM}
-          Status: ${ORACLE_STATUS}
-          Hasil: ${ORACLE_RESULT}
-          Terakhir: $(format_time_wib "$ORACLE_UPDATED")
-          Umur run: ${AGE_MIN} menit
-
-          📨 Telegram report
-          Run: #${TG_NUM}
-          Status: ${TG_STATUS}
-          Hasil: ${TG_RESULT}
-          Terakhir: $(format_time_wib "$TG_UPDATED")
-
-          🔗 Run Oracle:
-          ${ORACLE_URL}
-          EOF
-          }
-
-          install_oci() {
-            mkdir -p "$HOME/.oci"
-
-            printf '%s\n' "$OCI_KEY_CONTENT" > "$HOME/.oci/oci_api_key.pem"
-            chmod 600 "$HOME/.oci/oci_api_key.pem"
-
-            cat > "$HOME/.oci/config" <<EOF
-          [DEFAULT]
-          user=$OCI_USER_OCID
-          fingerprint=$OCI_FINGERPRINT
-          tenancy=$OCI_TENANCY_OCID
-          region=$OCI_REGION
-          key_file=$HOME/.oci/oci_api_key.pem
-          EOF
-
-            chmod 600 "$HOME/.oci/config"
-
-            python3 -m venv "$RUNNER_TEMP/oci-cli"
-            "$RUNNER_TEMP/oci-cli/bin/pip" install --quiet --upgrade pip
-            "$RUNNER_TEMP/oci-cli/bin/pip" install --quiet oci-cli
-
-            OCI="$RUNNER_TEMP/oci-cli/bin/oci"
-          }
-
-          oracle_summary() {
-            local DATA_FILE ENV_FILE COUNT INSTANCE_ID NAME STATE SHAPE OCPU RAM
-            local VNIC_ID PRIVATE_IP PUBLIC_IP
-
-            DATA_FILE="$RUNNER_TEMP/a1-instances.json"
-            ENV_FILE="$RUNNER_TEMP/a1.env"
-
-            "$OCI" compute instance list \
-              --compartment-id "$OCI_TENANCY_OCID" \
-              --region "$OCI_REGION" \
-              --limit 100 \
-              --output json \
-              --connection-timeout 30 \
-              --read-timeout 60 \
-              > "$DATA_FILE"
-
-            python3 - "$DATA_FILE" "$ENV_FILE" <<'PY'
-          import json
-          import shlex
-          import sys
-
-          src, dst = sys.argv[1], sys.argv[2]
-
-          with open(src, "r", encoding="utf-8") as f:
-              data = json.load(f).get("data", [])
-
-          items = [
-              x for x in data
-              if x.get("shape") == "VM.Standard.A1.Flex"
-              and x.get("lifecycle-state") != "TERMINATED"
-          ]
-
-          def put(f, key, value):
-              if value is None:
-                  value = ""
-              f.write(f"{key}={shlex.quote(str(value))}\n")
-
-          with open(dst, "w", encoding="utf-8") as f:
-              put(f, "COUNT", len(items))
-
-              if items:
-                  x = items[0]
-                  shape = x.get("shape-config") or {}
-                  put(f, "INSTANCE_ID", x.get("id"))
-                  put(f, "NAME", x.get("display-name"))
-                  put(f, "STATE", x.get("lifecycle-state"))
-                  put(f, "SHAPE", x.get("shape"))
-                  put(f, "OCPU", shape.get("ocpus"))
-                  put(f, "RAM", shape.get("memory-in-gbs"))
-              else:
-                  put(f, "INSTANCE_ID", "")
-                  put(f, "NAME", "")
-                  put(f, "STATE", "")
-                  put(f, "SHAPE", "")
-                  put(f, "OCPU", "")
-                  put(f, "RAM", "")
-          PY
-
-            # shellcheck disable=SC1090
-            source "$ENV_FILE"
-
-            if [ "$COUNT" -eq 0 ]; then
-              cat <<EOF
-          ☁️ ORACLE A1
-
-          🟡 Server A1 belum ada.
-
-          Region: Batam
-          Shape target: VM.Standard.A1.Flex
-          Target: 1 OCPU / 6 GB RAM
-
-          Workflow masih mencari kapasitas.
-          EOF
-              return
-            fi
-
-            PRIVATE_IP=""
-            PUBLIC_IP=""
-
-            VNIC_ID=$(
-              "$OCI" compute vnic-attachment list \
-                --compartment-id "$OCI_TENANCY_OCID" \
-                --instance-id "$INSTANCE_ID" \
-                --region "$OCI_REGION" \
-                --query 'data[0]."vnic-id"' \
-                --raw-output \
-                --connection-timeout 30 \
-                --read-timeout 60 \
-                2>/dev/null || true
+            INSTANCE=$(
+              grep -E 'Z Instance[[:space:]]+:' "$LOG" \
+              | tail -1 \
+              | sed -E 's/^.*Z Instance[[:space:]]+:[[:space:]]*//'
             )
 
-            if [ -n "$VNIC_ID" ] && \
-               [ "$VNIC_ID" != "null" ] && \
-               [ "$VNIC_ID" != "None" ]; then
+            PUBLIC_IP=$(
+              grep -E 'Z Public IP[[:space:]]+:' "$LOG" \
+              | tail -1 \
+              | sed -E 's/^.*Z Public IP[[:space:]]+:[[:space:]]*//'
+            )
 
-              PRIVATE_IP=$(
-                "$OCI" network vnic get \
-                  --vnic-id "$VNIC_ID" \
-                  --region "$OCI_REGION" \
-                  --query 'data."private-ip"' \
-                  --raw-output \
-                  --connection-timeout 30 \
-                  --read-timeout 60 \
-                  2>/dev/null || true
-              )
+            PRIVATE_IP=$(
+              grep -E 'Z Private IP[[:space:]]+:' "$LOG" \
+              | tail -1 \
+              | sed -E 's/^.*Z Private IP[[:space:]]+:[[:space:]]*//'
+            )
 
-              PUBLIC_IP=$(
-                "$OCI" network vnic get \
-                  --vnic-id "$VNIC_ID" \
-                  --region "$OCI_REGION" \
-                  --query 'data."public-ip"' \
-                  --raw-output \
-                  --connection-timeout 30 \
-                  --read-timeout 60 \
-                  2>/dev/null || true
-              )
-            fi
-
-            [ "$PRIVATE_IP" = "null" ] && PRIVATE_IP=""
-            [ "$PRIVATE_IP" = "None" ] && PRIVATE_IP=""
-            [ "$PUBLIC_IP" = "null" ] && PUBLIC_IP=""
-            [ "$PUBLIC_IP" = "None" ] && PUBLIC_IP=""
-
-            [ -z "$PRIVATE_IP" ] && PRIVATE_IP="belum tersedia"
+            [ -z "$INSTANCE" ] && INSTANCE="berhasil dibuat"
             [ -z "$PUBLIC_IP" ] && PUBLIC_IP="belum tersedia"
-            [ -z "$OCPU" ] && OCPU="-"
-            [ -z "$RAM" ] && RAM="-"
+            [ -z "$PRIVATE_IP" ] && PRIVATE_IP="belum tersedia"
 
-            if [ "$STATE" = "RUNNING" ]; then
-              ICON="🟢"
-            else
-              ICON="🟡"
-            fi
+            MSG=$(printf '%s\n' \
+              "🎉 ORACLE A1 BERHASIL!" \
+              "" \
+              "🔢 Percobaan: #${RUN_NUMBER}" \
+              "🕒 ${NOW_WIB}" \
+              "" \
+              "🟢 GitHub Actions: NORMAL" \
+              "🟢 Oracle Server: RUNNING" \
+              "" \
+              "🌏 Region: Batam" \
+              "🖥 Shape: VM.Standard.A1.Flex" \
+              "⚙️ CPU: 1 OCPU" \
+              "💾 RAM: 6 GB" \
+              "" \
+              "📛 Instance:" \
+              "${INSTANCE}" \
+              "" \
+              "🌐 Public IP:" \
+              "${PUBLIC_IP}" \
+              "" \
+              "🔒 Private IP:" \
+              "${PRIVATE_IP}" \
+              "" \
+              "✅ Server berhasil dibuat dan sudah RUNNING." \
+              "✅ Bot tidak akan membuat instance kedua."
+            )
 
-            cat <<EOF
-          🖥️ STATUS SERVER ORACLE
-
-          ${ICON} Status: ${STATE}
-          📛 Nama: ${NAME}
-          🌏 Region: Batam
-          🖥 Shape: ${SHAPE}
-          ⚙️ OCPU: ${OCPU}
-          💾 RAM: ${RAM} GB
-          🌐 Public IP: ${PUBLIC_IP}
-          🔒 Private IP: ${PRIVATE_IP}
-
-          Jumlah A1 aktif/provisioning: ${COUNT}
-          EOF
-          }
-
-          log_summary() {
-            local RUN_JSON RUN_ID RUN_NUM RUN_RESULT RUN_UPDATED RUN_URL LOG_DIR LOG_FILE RESULT
-
-            RUN_JSON="$(get_run_data "tests.yml")"
-            RUN_ID="$(echo "$RUN_JSON" | jq -r '.workflow_runs[0].id // empty')"
-            RUN_NUM="$(echo "$RUN_JSON" | jq -r '.workflow_runs[0].run_number // "-"')"
-            RUN_RESULT="$(echo "$RUN_JSON" | jq -r '.workflow_runs[0].conclusion // "-"')"
-            RUN_UPDATED="$(echo "$RUN_JSON" | jq -r '.workflow_runs[0].updated_at // empty')"
-            RUN_URL="$(echo "$RUN_JSON" | jq -r '.workflow_runs[0].html_url // "-"')"
-
-            if [ -z "$RUN_ID" ]; then
-              echo "📜 LOG TERAKHIR"$'\n\n'"Belum ada run Oracle."
-              return
-            fi
-
-            LOG_DIR="$RUNNER_TEMP/last-log"
-            LOG_FILE="$RUNNER_TEMP/oracle-last.log"
-            mkdir -p "$LOG_DIR"
-
-            curl -L --fail --silent --show-error \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/logs" \
-              -o "$RUNNER_TEMP/last-log.zip"
-
-            unzip -q "$RUNNER_TEMP/last-log.zip" -d "$LOG_DIR"
-
-            : > "$LOG_FILE"
-            find "$LOG_DIR" -type f -name "*.txt" -exec cat {} \; >> "$LOG_FILE"
-
-            RESULT="Belum mendapatkan A1."
-
-            if grep -qE 'Z ORACLE A1 BERHASIL RUNNING$' "$LOG_FILE"; then
-              RESULT="🎉 A1 berhasil dan RUNNING."
-            elif grep -qE 'Z A1 SUDAH ADA$' "$LOG_FILE"; then
-              RESULT="🟢 A1 sudah ada. Tidak membuat instance kedua."
-            elif grep -qE 'Z ORACLE RATE LIMIT$' "$LOG_FILE"; then
-              RESULT="🟠 Oracle rate limit: 429 / TooManyRequests."
-            elif grep -qE 'Z STOK A1 BATAM MASIH HABIS$' "$LOG_FILE"; then
-              RESULT="🟡 Kapasitas A1 Batam masih habis."
-            elif grep -qE 'Z KONEKSI TIMEOUT$' "$LOG_FILE"; then
-              RESULT="🟠 Koneksi Oracle timeout."
-            elif [ "$RUN_RESULT" = "failure" ]; then
-              RESULT="🔴 Workflow mengalami error."
-            fi
-
-            cat <<EOF
-          📜 LOG TERAKHIR
-
-          Oracle run: #${RUN_NUM}
-          Waktu: $(format_time_wib "$RUN_UPDATED")
-          Workflow: ${RUN_RESULT}
-
-          Hasil:
-          ${RESULT}
-
-          🔗 Lihat log lengkap:
-          ${RUN_URL}
-          EOF
-          }
-
-          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || \
-             [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
-            echo "Secret Telegram belum lengkap."
-            exit 1
+            send_message "$MSG" || true
+            exit 0
           fi
 
-          case "$COMMAND" in
-            github)
-              MSG="$(github_summary)"
-              ;;
+          # A1 SUDAH ADA: jangan spam setelah berhasil
+          if grep -qE 'Z A1 SUDAH ADA$' "$LOG"; then
+            echo "A1 sudah ada."
+            echo "Tidak mengirim laporan percobaan lagi."
+            exit 0
+          fi
 
-            log)
-              MSG="$(log_summary)"
-              ;;
+          # ERROR WORKFLOW SERIUS
+          if [ "$RUN_RESULT" != "success" ]; then
 
-            oracle|server)
-              install_oci
-              MSG="$(oracle_summary)"
-              ;;
+            MSG=$(printf '%s\n' \
+              "❌ ORACLE A1 WORKFLOW ERROR" \
+              "" \
+              "🔢 Percobaan: #${RUN_NUMBER}" \
+              "🕒 ${NOW_WIB}" \
+              "" \
+              "🔴 GitHub Actions: ${RUN_RESULT}" \
+              "⚠️ Workflow Oracle mengalami error." \
+              "" \
+              "Tekan tombol GitHub Actions di bawah untuk melihat run."
+            )
 
-            status)
-              GITHUB_TEXT="$(github_summary)"
-              install_oci
-              ORACLE_TEXT="$(oracle_summary)"
+            send_message "$MSG" || true
+            exit 0
+          fi
 
-              MSG=$(printf '%s\n\n%s' \
-                "🟢 STATUS SEMUA" \
-                "$GITHUB_TEXT"$'\n\n'"$ORACLE_TEXT")
-              ;;
+          # LAPORAN SETIAP PERCOBAAN
+          STATUS="A1 belum berhasil didapat."
+          ORACLE_ICON="🟡"
 
-            *)
-              MSG="❌ Perintah tidak dikenal: ${COMMAND}"
-              ;;
-          esac
+          if grep -qE 'Z ORACLE RATE LIMIT$' "$LOG"; then
+            STATUS="Oracle sedang rate limit (429 / TooManyRequests)."
+            ORACLE_ICON="🟠"
 
-          send_message "$MSG"
+          elif grep -qE 'Z STOK A1 BATAM MASIH HABIS$' "$LOG"; then
+            STATUS="Kapasitas Oracle A1 Batam masih habis."
+            ORACLE_ICON="🟡"
+
+          elif grep -qE 'Z KONEKSI TIMEOUT$' "$LOG"; then
+            STATUS="Koneksi ke Oracle sempat timeout."
+            ORACLE_ICON="🟠"
+
+          elif grep -qE 'Z BELUM ADA A1$' "$LOG"; then
+            STATUS="A1 belum didapat. Pencarian masih berjalan."
+            ORACLE_ICON="🟡"
+          fi
+
+          MSG=$(printf '%s\n' \
+            "🤖 ORACLE A1 MONITOR" \
+            "" \
+            "🔢 Percobaan: #${RUN_NUMBER}" \
+            "🕒 ${NOW_WIB}" \
+            "" \
+            "🟢 GitHub Actions: AKTIF / NORMAL" \
+            "${ORACLE_ICON} Oracle A1: BELUM DIDAPAT" \
+            "" \
+            "📋 Hasil percobaan:" \
+            "${STATUS}" \
+            "" \
+            "🌏 Region: Batam" \
+            "🖥 Shape: VM.Standard.A1.Flex" \
+            "⚙️ Target: 1 OCPU" \
+            "💾 RAM: 6 GB" \
+            "💿 Boot: 50 GB" \
+            "" \
+            "⏱ Target percobaan: setiap 10 menit" \
+            "📨 Telegram: setiap selesai percobaan" \
+            "" \
+            "Bot akan langsung memberi tahu jika A1 berhasil."
+          )
+
+          send_message "$MSG" || true
+          echo "Laporan Oracle #${RUN_NUMBER} selesai."
