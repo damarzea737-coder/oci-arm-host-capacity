@@ -1,53 +1,21 @@
-name: Tests
-
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '*/10 * * * *'
-
-permissions:
-  contents: read
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.1'
-
-      - name: Install Dependencies
-        run: composer install --prefer-dist --no-progress
-
-      - name: Create OCI Private Key File
+      - name: Validate OCI API Key Pair
         env:
-          OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
+          EXPECTED_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
         run: |
-          printf '%s\n' "$OCI_KEY_CONTENT" > "$GITHUB_WORKSPACE/private_key.pem"
-          chmod 600 "$GITHUB_WORKSPACE/private_key.pem"
+          ACTUAL=$(openssl rsa -pubout -outform DER \
+            -in "$GITHUB_WORKSPACE/private_key.pem" 2>/dev/null \
+            | openssl md5 -c \
+            | sed 's/^.*= //' \
+            | tr '[:upper:]' '[:lower:]' \
+            | tr -d '[:space:]')
 
-      - name: Execute OCI ARM Check
-        env:
-          OCI_REGION: ap-batam-1
-          OCI_USER_ID: ${{ secrets.OCI_USER_OCID }}
-          OCI_TENANCY_ID: ${{ secrets.OCI_TENANCY_OCID }}
-          OCI_KEY_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
-          OCI_PRIVATE_KEY_FILENAME: ${{ github.workspace }}/private_key.pem
-          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+          EXPECTED=$(printf '%s' "$EXPECTED_FINGERPRINT" \
+            | tr '[:upper:]' '[:lower:]' \
+            | tr -d '[:space:]')
 
-          OCI_IMAGE_ID: ocid1.image.oc1.ap-batam-1.aaaaaaaawggpxox66i2n3l5mvy2fvh5i3z762k4d2vzxxd3ezygzgl5i5iqa
-
-          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
-
-          OCI_OCPUS: "1"
-          OCI_MEMORY_IN_GBS: "6"
-          OCI_MAX_INSTANCES: "1"
-          OCI_SHAPE: VM.Standard.A1.Flex
-
-        run: php index.php
+          if [ "$ACTUAL" = "$EXPECTED" ]; then
+            echo "OK: Private key matches OCI fingerprint."
+          else
+            echo "ERROR: OCI_KEY_CONTENT does NOT match OCI_FINGERPRINT."
+            exit 1
+          fi
