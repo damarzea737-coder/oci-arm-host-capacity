@@ -19,11 +19,12 @@ jobs:
 
     env:
       OCI_REGION: ap-batam-1
-      OCI_IMAGE_ID: ocid1.image.oc1.ap-batam-1.aaaaaaaawggpxox66i2n3l5mvy2fvh5i3z762k4d2vzxxd3ezygzgl5i5iqa
       OCI_SHAPE: VM.Standard.A1.Flex
+      OCI_OCPUS: "1"
+      OCI_MEMORY_GB: "6"
+      OCI_BOOT_GB: "50"
 
     steps:
-
       # ============================================================
       # 1. VALIDASI SECRET
       # ============================================================
@@ -112,7 +113,7 @@ jobs:
           "$RUNNER_TEMP/oci-cli/bin/oci" --version
 
       # ============================================================
-      # 4. TEST KONEKSI ORACLE
+      # 4. TEST KONEKSI
       # ============================================================
 
       - name: Verify OCI Connection
@@ -123,16 +124,14 @@ jobs:
         run: |
           OCI="$RUNNER_TEMP/oci-cli/bin/oci"
 
-          echo "Checking Oracle API authentication..."
+          echo "Checking Oracle authentication..."
 
           "$OCI" iam user get \
             --user-id "$OCI_USER_OCID" \
             --output json \
             >/dev/null
 
-          echo "API authentication OK."
-
-          echo "Checking Compute API Batam..."
+          echo "Authentication OK."
 
           "$OCI" compute instance list \
             --compartment-id "$OCI_TENANCY_OCID" \
@@ -141,10 +140,71 @@ jobs:
             --output json \
             >/dev/null
 
-          echo "SUCCESS: Oracle API dan Compute Batam dapat diakses."
+          echo "Compute API Batam OK."
 
       # ============================================================
-      # 5. CEK APAKAH SUDAH ADA A1
+      # 5. VALIDASI SUBNET
+      # ============================================================
+
+      - name: Validate OCI Subnet
+        id: subnet
+        env:
+          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+          SUPPRESS_LABEL_WARNING: "True"
+        run: |
+          OCI="$RUNNER_TEMP/oci-cli/bin/oci"
+
+          echo "Checking subnet..."
+
+          "$OCI" network subnet get \
+            --subnet-id "$OCI_SUBNET_ID" \
+            --region "$OCI_REGION" \
+            --output json \
+            >/dev/null
+
+          SUBNET_NAME=$(
+            "$OCI" network subnet get \
+              --subnet-id "$OCI_SUBNET_ID" \
+              --region "$OCI_REGION" \
+              --query 'data."display-name"' \
+              --raw-output
+          )
+
+          SUBNET_AD=$(
+            "$OCI" network subnet get \
+              --subnet-id "$OCI_SUBNET_ID" \
+              --region "$OCI_REGION" \
+              --query 'data."availability-domain"' \
+              --raw-output
+          )
+
+          PRIVATE_SUBNET=$(
+            "$OCI" network subnet get \
+              --subnet-id "$OCI_SUBNET_ID" \
+              --region "$OCI_REGION" \
+              --query 'data."prohibit-public-ip-on-vnic"' \
+              --raw-output
+          )
+
+          if [ "$SUBNET_AD" = "None" ] || \
+             [ "$SUBNET_AD" = "null" ]; then
+            SUBNET_AD=""
+          fi
+
+          echo "Subnet ditemukan: $SUBNET_NAME"
+          echo "Private subnet: $PRIVATE_SUBNET"
+
+          if [ -n "$SUBNET_AD" ]; then
+            echo "Subnet AD: $SUBNET_AD"
+          else
+            echo "Subnet bersifat regional."
+          fi
+
+          echo "subnet_ad=$SUBNET_AD" >> "$GITHUB_OUTPUT"
+          echo "private_subnet=$PRIVATE_SUBNET" >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # 6. CEK INSTANCE A1 YANG SUDAH ADA
       # ============================================================
 
       - name: Check Existing A1 Instance
@@ -154,8 +214,6 @@ jobs:
           SUPPRESS_LABEL_WARNING: "True"
         run: |
           OCI="$RUNNER_TEMP/oci-cli/bin/oci"
-
-          echo "Mengecek apakah A1 sudah ada..."
 
           COUNT=$(
             "$OCI" compute instance list \
@@ -173,27 +231,23 @@ jobs:
           echo "Jumlah A1 aktif/provisioning: $COUNT"
 
           if [ "$COUNT" -ge 1 ]; then
-
             echo "exists=true" >> "$GITHUB_OUTPUT"
 
             echo "========================================"
             echo "A1 SUDAH ADA"
-            echo "Tidak akan membuat instance kedua."
+            echo "Tidak membuat instance baru."
             echo "========================================"
-
           else
-
             echo "exists=false" >> "$GITHUB_OUTPUT"
 
             echo "========================================"
             echo "BELUM ADA A1"
-            echo "Akan mencoba membuat instance."
+            echo "Workflow akan mencoba membuat."
             echo "========================================"
-
           fi
 
       # ============================================================
-      # 6. AMBIL AVAILABILITY DOMAIN
+      # 7. PILIH AVAILABILITY DOMAIN
       # ============================================================
 
       - name: Get Availability Domain
@@ -205,28 +259,88 @@ jobs:
         run: |
           OCI="$RUNNER_TEMP/oci-cli/bin/oci"
 
-          echo "Mencari Availability Domain..."
+          SUBNET_AD="${{ steps.subnet.outputs.subnet_ad }}"
 
-          AD=$(
-            "$OCI" iam availability-domain list \
-              --compartment-id "$OCI_TENANCY_OCID" \
-              --region "$OCI_REGION" \
-              --query 'data[0].name' \
-              --raw-output
-          )
+          if [ -n "$SUBNET_AD" ]; then
+
+            AD="$SUBNET_AD"
+
+            echo "Menggunakan AD dari subnet."
+
+          else
+
+            AD=$(
+              "$OCI" iam availability-domain list \
+                --compartment-id "$OCI_TENANCY_OCID" \
+                --region "$OCI_REGION" \
+                --query 'data[0].name' \
+                --raw-output
+            )
+
+          fi
 
           if [ -z "$AD" ] || [ "$AD" = "null" ]; then
             echo "ERROR: Availability Domain tidak ditemukan."
             exit 1
           fi
 
-          echo "Availability Domain ditemukan:"
-          echo "$AD"
+          echo "Availability Domain: $AD"
 
           echo "ad=$AD" >> "$GITHUB_OUTPUT"
 
       # ============================================================
-      # 7. COBA BUAT A1
+      # 8. CARI IMAGE ARM TERBARU YANG KOMPATIBEL
+      # ============================================================
+
+      - name: Get Latest Compatible Oracle Linux Image
+        id: image
+        if: steps.existing.outputs.exists == 'false'
+        env:
+          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          SUPPRESS_LABEL_WARNING: "True"
+        run: |
+          OCI="$RUNNER_TEMP/oci-cli/bin/oci"
+
+          echo "Mencari Oracle Linux terbaru untuk $OCI_SHAPE..."
+
+          IMAGE_ID=$(
+            "$OCI" compute image list \
+              --compartment-id "$OCI_TENANCY_OCID" \
+              --region "$OCI_REGION" \
+              --operating-system "Oracle Linux" \
+              --shape "$OCI_SHAPE" \
+              --lifecycle-state AVAILABLE \
+              --sort-by TIMECREATED \
+              --sort-order DESC \
+              --limit 1 \
+              --query 'data[0].id' \
+              --raw-output
+          )
+
+          if [ -z "$IMAGE_ID" ] || \
+             [ "$IMAGE_ID" = "null" ] || \
+             [ "$IMAGE_ID" = "None" ]; then
+
+            echo "ERROR: Image Oracle Linux kompatibel A1 tidak ditemukan."
+            exit 1
+          fi
+
+          IMAGE_NAME=$(
+            "$OCI" compute image get \
+              --image-id "$IMAGE_ID" \
+              --region "$OCI_REGION" \
+              --query 'data."display-name"' \
+              --raw-output
+          )
+
+          echo "Image ditemukan:"
+          echo "$IMAGE_NAME"
+
+          echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # 9. COBA BUAT INSTANCE
       # ============================================================
 
       - name: Try Create Oracle A1
@@ -239,6 +353,8 @@ jobs:
           OCI="$RUNNER_TEMP/oci-cli/bin/oci"
 
           AD="${{ steps.ad.outputs.ad }}"
+          IMAGE_ID="${{ steps.image.outputs.image_id }}"
+          IMAGE_NAME="${{ steps.image.outputs.image_name }}"
 
           NAME="free-a1-$(date +%Y%m%d-%H%M)"
 
@@ -249,9 +365,10 @@ jobs:
           echo "Region : $OCI_REGION"
           echo "AD     : $AD"
           echo "Shape  : $OCI_SHAPE"
-          echo "OCPU   : 1"
-          echo "RAM    : 6 GB"
-          echo "Boot   : 50 GB"
+          echo "OCPU   : $OCI_OCPUS"
+          echo "RAM    : $OCI_MEMORY_GB GB"
+          echo "Boot   : $OCI_BOOT_GB GB"
+          echo "Image  : $IMAGE_NAME"
           echo "Name   : $NAME"
           echo "========================================"
           echo ""
@@ -262,12 +379,12 @@ jobs:
             --availability-domain "$AD" \
             --compartment-id "$OCI_TENANCY_OCID" \
             --subnet-id "$OCI_SUBNET_ID" \
-            --image-id "$OCI_IMAGE_ID" \
+            --image-id "$IMAGE_ID" \
             --shape "$OCI_SHAPE" \
-            --shape-config '{"ocpus":1,"memoryInGBs":6}' \
+            --shape-config "{\"ocpus\":$OCI_OCPUS,\"memoryInGBs\":$OCI_MEMORY_GB}" \
             --display-name "$NAME" \
             --ssh-authorized-keys-file "$HOME/.oci/server_ssh_key.pub" \
-            --boot-volume-size-in-gbs 50 \
+            --boot-volume-size-in-gbs "$OCI_BOOT_GB" \
             --wait-for-state RUNNING \
             --wait-interval-seconds 10 \
             --max-wait-seconds 600 \
@@ -280,7 +397,7 @@ jobs:
           set -e
 
           # ========================================================
-          # JIKA GAGAL
+          # ERROR HANDLER
           # ========================================================
 
           if [ "$STATUS" -ne 0 ]; then
@@ -299,43 +416,59 @@ jobs:
               echo "STOK A1 BATAM MASIH HABIS"
               echo "========================================"
               echo ""
-              echo "Tidak ada kesalahan konfigurasi."
+              echo "Konfigurasi sudah berhasil."
               echo "Workflow akan mencoba lagi otomatis."
               echo ""
 
               exit 0
+            fi
 
+            if echo "$ERROR_TEXT" | grep -qiE \
+              'TooManyRequests|429'; then
+
+              echo "Oracle sedang membatasi request."
+              echo "Akan dicoba kembali pada jadwal berikutnya."
+
+              exit 0
             fi
 
             if echo "$ERROR_TEXT" | grep -qi \
               'LimitExceeded'; then
 
               echo "========================================"
-              echo "LIMIT ORACLE SUDAH TERCAPAI"
+              echo "LIMIT RESOURCE ORACLE TERCAPAI"
               echo "========================================"
 
               exit 1
-
             fi
 
             if echo "$ERROR_TEXT" | grep -qi \
               'InvalidParameter'; then
 
               echo "========================================"
-              echo "ADA PARAMETER ORACLE YANG TIDAK VALID"
-              echo "Kemungkinan IMAGE / SUBNET / SHAPE."
+              echo "PARAMETER INSTANCE TIDAK VALID"
               echo "========================================"
 
               exit 1
+            fi
 
+            if echo "$ERROR_TEXT" | grep -qi \
+              'NotAuthorizedOrNotFound'; then
+
+              echo "========================================"
+              echo "RESOURCE LAUNCH TIDAK DITEMUKAN / TIDAK DIAKSES"
+              echo "Subnet dan image sudah divalidasi."
+              echo "Lihat Response Oracle di atas."
+              echo "========================================"
+
+              exit 1
             fi
 
             echo "========================================"
-            echo "ERROR BUKAN MASALAH KAPASITAS"
+            echo "ERROR LAIN DARI ORACLE"
             echo "========================================"
 
             exit "$STATUS"
-
           fi
 
           # ========================================================
@@ -348,32 +481,22 @@ jobs:
           echo "========================================"
 
           INSTANCE_ID=$(
-            python3 - <<'PY'
-          import json
-          import os
-
-          path = os.path.join(
-              os.environ["RUNNER_TEMP"],
-              "launch.json"
+            "$OCI" compute instance list \
+              --compartment-id "$OCI_TENANCY_OCID" \
+              --region "$OCI_REGION" \
+              --display-name "$NAME" \
+              --query 'data[0].id' \
+              --raw-output
           )
 
-          with open(path, "r") as f:
-              obj = json.load(f)
+          if [ -z "$INSTANCE_ID" ] || \
+             [ "$INSTANCE_ID" = "null" ]; then
 
-          print(obj["data"]["id"])
-          PY
-          )
-
-          if [ -z "$INSTANCE_ID" ]; then
-            echo "Instance dibuat tetapi OCID tidak ditemukan."
+            echo "Instance berhasil dibuat tetapi OCID tidak ditemukan."
             exit 1
           fi
 
-          echo "Instance OCID berhasil didapat."
-
-          # ========================================================
-          # AMBIL VNIC
-          # ========================================================
+          echo "Instance OCID ditemukan."
 
           VNIC_ID=$(
             "$OCI" compute vnic-attachment list \
@@ -382,12 +505,6 @@ jobs:
               --query 'data[0]."vnic-id"' \
               --raw-output
           )
-
-          echo "VNIC berhasil ditemukan."
-
-          # ========================================================
-          # AMBIL PUBLIC IP
-          # ========================================================
 
           PUBLIC_IP=$(
             "$OCI" network vnic get \
@@ -405,12 +522,13 @@ jobs:
 
           echo ""
           echo "========================================"
-          echo "🎉 ORACLE A1 BERHASIL RUNNING"
+          echo "ORACLE A1 BERHASIL RUNNING"
           echo "========================================"
-          echo "Instance : $NAME"
-          echo "OCPU     : 1"
-          echo "RAM      : 6 GB"
-          echo "Shape    : $OCI_SHAPE"
-          echo "Private IP: $PRIVATE_IP"
-          echo "Public IP : $PUBLIC_IP"
+          echo "Instance   : $NAME"
+          echo "Image      : $IMAGE_NAME"
+          echo "Shape      : $OCI_SHAPE"
+          echo "OCPU       : $OCI_OCPUS"
+          echo "RAM        : $OCI_MEMORY_GB GB"
+          echo "Private IP : $PRIVATE_IP"
+          echo "Public IP  : $PUBLIC_IP"
           echo "========================================"
