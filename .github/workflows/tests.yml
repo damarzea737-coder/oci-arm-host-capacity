@@ -25,11 +25,6 @@ jobs:
       OCI_BOOT_GB: "50"
 
     steps:
-
-      # ============================================================
-      # 1. VALIDASI SECRET
-      # ============================================================
-
       - name: Validate Secrets
         env:
           OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
@@ -39,33 +34,16 @@ jobs:
           OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
           OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
         run: |
-          FAILED=0
-
-          for VAR in \
-            OCI_KEY_CONTENT \
-            OCI_USER_OCID \
-            OCI_TENANCY_OCID \
-            OCI_FINGERPRINT \
-            OCI_SUBNET_ID \
-            OCI_SSH_PUBLIC_KEY
-          do
+          set -e
+          for VAR in OCI_KEY_CONTENT OCI_USER_OCID OCI_TENANCY_OCID OCI_FINGERPRINT OCI_SUBNET_ID OCI_SSH_PUBLIC_KEY; do
             if [ -z "${!VAR}" ]; then
               echo "ERROR: $VAR kosong."
-              FAILED=1
-            else
-              echo "OK: $VAR tersedia."
+              exit 1
             fi
           done
+          echo "Semua secret tersedia."
 
-          if [ "$FAILED" -ne 0 ]; then
-            exit 1
-          fi
-
-      # ============================================================
-      # 2. BUAT OCI CONFIG
-      # ============================================================
-
-      - name: Create OCI Credentials
+      - name: Prepare OCI CLI
         env:
           OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
           OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
@@ -73,152 +51,55 @@ jobs:
           OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
           OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
         run: |
+          set -e
           mkdir -p "$HOME/.oci"
 
-          printf '%s\n' "$OCI_KEY_CONTENT" \
-            > "$HOME/.oci/oci_api_key.pem"
-
+          printf '%s\n' "$OCI_KEY_CONTENT" > "$HOME/.oci/oci_api_key.pem"
           chmod 600 "$HOME/.oci/oci_api_key.pem"
 
-          cat > "$HOME/.oci/config" <<EOF
+          cat > "$HOME/.oci/config" <<CFG
           [DEFAULT]
           user=$OCI_USER_OCID
           fingerprint=$OCI_FINGERPRINT
           tenancy=$OCI_TENANCY_OCID
           region=$OCI_REGION
           key_file=$HOME/.oci/oci_api_key.pem
-          EOF
-
+          CFG
           chmod 600 "$HOME/.oci/config"
 
-          printf '%s\n' "$OCI_SSH_PUBLIC_KEY" \
-            > "$HOME/.oci/server_ssh_key.pub"
-
+          printf '%s\n' "$OCI_SSH_PUBLIC_KEY" > "$HOME/.oci/server_ssh_key.pub"
           chmod 600 "$HOME/.oci/server_ssh_key.pub"
 
-      # ============================================================
-      # 3. INSTALL OCI CLI
-      # ============================================================
-
-      - name: Install OCI CLI
-        run: |
           python3 -m venv "$RUNNER_TEMP/oci-cli"
-
-          "$RUNNER_TEMP/oci-cli/bin/pip" \
-            install --quiet --upgrade pip
-
-          "$RUNNER_TEMP/oci-cli/bin/pip" \
-            install --quiet oci-cli
-
-          echo "OCI CLI:"
+          "$RUNNER_TEMP/oci-cli/bin/pip" install --quiet --upgrade pip
+          "$RUNNER_TEMP/oci-cli/bin/pip" install --quiet oci-cli
           "$RUNNER_TEMP/oci-cli/bin/oci" --version
 
-      # ============================================================
-      # 4. TEST AUTH
-      # ============================================================
-
-      - name: Verify OCI Connection
+      - name: Smart Capacity Check and Launch
         env:
           OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
           OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
           SUPPRESS_LABEL_WARNING: "True"
         run: |
+          set -e
           OCI="$RUNNER_TEMP/oci-cli/bin/oci"
 
           echo "Checking Oracle authentication..."
-
           "$OCI" iam user get \
             --user-id "$OCI_USER_OCID" \
             --output json \
             --connection-timeout 30 \
             --read-timeout 60 \
-            >/dev/null
-
+            --max-retries 0 >/dev/null
           echo "Authentication OK."
 
-          "$OCI" compute instance list \
-            --compartment-id "$OCI_TENANCY_OCID" \
-            --region "$OCI_REGION" \
-            --limit 1 \
-            --output json \
-            --connection-timeout 30 \
-            --read-timeout 60 \
-            >/dev/null
+          # Beri jeda kecil antar request agar tidak menembak API bertubi-tubi.
+          sleep 2
 
-          echo "Compute API Batam OK."
-
-      # ============================================================
-      # 5. VALIDASI SUBNET
-      # ============================================================
-
-      - name: Validate OCI Subnet
-        id: subnet
-        env:
-          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
-          SUPPRESS_LABEL_WARNING: "True"
-        run: |
-          OCI="$RUNNER_TEMP/oci-cli/bin/oci"
-
-          echo "Checking subnet..."
-
-          SUBNET_NAME=$(
-            "$OCI" network subnet get \
-              --subnet-id "$OCI_SUBNET_ID" \
-              --region "$OCI_REGION" \
-              --query 'data."display-name"' \
-              --raw-output \
-              --connection-timeout 30 \
-              --read-timeout 60
-          )
-
-          SUBNET_AD=$(
-            "$OCI" network subnet get \
-              --subnet-id "$OCI_SUBNET_ID" \
-              --region "$OCI_REGION" \
-              --query 'data."availability-domain"' \
-              --raw-output \
-              --connection-timeout 30 \
-              --read-timeout 60 2>/dev/null || true
-          )
-
-          PRIVATE_SUBNET=$(
-            "$OCI" network subnet get \
-              --subnet-id "$OCI_SUBNET_ID" \
-              --region "$OCI_REGION" \
-              --query 'data."prohibit-public-ip-on-vnic"' \
-              --raw-output \
-              --connection-timeout 30 \
-              --read-timeout 60
-          )
-
-          if [ "$SUBNET_AD" = "None" ] || \
-             [ "$SUBNET_AD" = "null" ]; then
-            SUBNET_AD=""
-          fi
-
-          echo "Subnet: $SUBNET_NAME"
-          echo "Private subnet: $PRIVATE_SUBNET"
-
-          if [ -z "$SUBNET_AD" ]; then
-            echo "Subnet regional."
-          else
-            echo "Subnet AD: $SUBNET_AD"
-          fi
-
-          echo "subnet_ad=$SUBNET_AD" >> "$GITHUB_OUTPUT"
-
-      # ============================================================
-      # 6. CEK A1 YANG SUDAH ADA
-      # ============================================================
-
-      - name: Check Existing A1 Instance
-        id: existing
-        env:
-          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-          SUPPRESS_LABEL_WARNING: "True"
-        run: |
-          OCI="$RUNNER_TEMP/oci-cli/bin/oci"
-
+          # --------------------------------------------------------
+          # CEK INSTANCE A1 YANG SUDAH ADA
+          # --------------------------------------------------------
           COUNT=$(
             "$OCI" compute instance list \
               --compartment-id "$OCI_TENANCY_OCID" \
@@ -227,49 +108,60 @@ jobs:
               --query 'length(data[?shape==`"VM.Standard.A1.Flex"` && "lifecycle-state"!=`"TERMINATED"`])' \
               --raw-output \
               --connection-timeout 30 \
-              --read-timeout 60
+              --read-timeout 60 \
+              --max-retries 0
           )
 
-          if [ -z "$COUNT" ] || [ "$COUNT" = "null" ]; then
-            COUNT=0
-          fi
-
+          [ -z "$COUNT" ] && COUNT=0
+          [ "$COUNT" = "null" ] && COUNT=0
           echo "Jumlah A1 aktif/provisioning: $COUNT"
 
           if [ "$COUNT" -ge 1 ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-
             echo "========================================"
             echo "A1 SUDAH ADA"
             echo "Tidak membuat instance kedua."
             echo "========================================"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-
-            echo "========================================"
-            echo "BELUM ADA A1"
-            echo "Akan mencoba mendapatkan kapasitas."
-            echo "========================================"
+            exit 0
           fi
 
-      # ============================================================
-      # 7. AVAILABILITY DOMAIN
-      # ============================================================
+          echo "========================================"
+          echo "BELUM ADA A1"
+          echo "Akan mengecek kapasitas lebih dulu."
+          echo "========================================"
 
-      - name: Get Availability Domain
-        id: ad
-        if: steps.existing.outputs.exists == 'false'
-        env:
-          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-          SUPPRESS_LABEL_WARNING: "True"
-        run: |
-          OCI="$RUNNER_TEMP/oci-cli/bin/oci"
+          sleep 2
 
-          SUBNET_AD="${{ steps.subnet.outputs.subnet_ad }}"
+          # --------------------------------------------------------
+          # AMBIL DATA SUBNET SEKALI SAJA
+          # --------------------------------------------------------
+          "$OCI" network subnet get \
+            --subnet-id "$OCI_SUBNET_ID" \
+            --region "$OCI_REGION" \
+            --output json \
+            --connection-timeout 30 \
+            --read-timeout 60 \
+            --max-retries 0 > "$RUNNER_TEMP/subnet.json"
+
+          python3 - <<'PY' > "$RUNNER_TEMP/subnet.env"
+          import json, os, shlex
+          p = os.path.join(os.environ['RUNNER_TEMP'], 'subnet.json')
+          d = json.load(open(p, encoding='utf-8')).get('data', {})
+          for k, v in {
+              'SUBNET_NAME': d.get('display-name', ''),
+              'SUBNET_AD': d.get('availability-domain') or '',
+              'PRIVATE_SUBNET': d.get('prohibit-public-ip-on-vnic', '')
+          }.items():
+              print(f"{k}={shlex.quote(str(v))}")
+          PY
+          source "$RUNNER_TEMP/subnet.env"
+
+          echo "Subnet: $SUBNET_NAME"
+          echo "Private subnet: $PRIVATE_SUBNET"
 
           if [ -n "$SUBNET_AD" ]; then
             AD="$SUBNET_AD"
           else
+            sleep 2
             AD=$(
               "$OCI" iam availability-domain list \
                 --compartment-id "$OCI_TENANCY_OCID" \
@@ -277,7 +169,8 @@ jobs:
                 --query 'data[0].name' \
                 --raw-output \
                 --connection-timeout 30 \
-                --read-timeout 60
+                --read-timeout 60 \
+                --max-retries 0
             )
           fi
 
@@ -287,84 +180,138 @@ jobs:
           fi
 
           echo "Availability Domain: $AD"
-          echo "ad=$AD" >> "$GITHUB_OUTPUT"
+          sleep 2
 
-      # ============================================================
-      # 8. CARI IMAGE ARM TERBARU
-      # ============================================================
+          # --------------------------------------------------------
+          # CAPACITY REPORT: CEK STOK SEBELUM LAUNCH
+          # --------------------------------------------------------
+          SHAPE_JSON=$(printf \
+            '[{"instanceShape":"%s","instanceShapeConfig":{"ocpus":%s,"memoryInGBs":%s}}]' \
+            "$OCI_SHAPE" "$OCI_OCPUS" "$OCI_MEMORY_GB")
 
-      - name: Get Latest Compatible Oracle Linux Image
-        id: image
-        if: steps.existing.outputs.exists == 'false'
-        env:
-          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-          SUPPRESS_LABEL_WARNING: "True"
-        run: |
-          OCI="$RUNNER_TEMP/oci-cli/bin/oci"
+          set +e
+          "$OCI" compute compute-capacity-report create \
+            --availability-domain "$AD" \
+            --compartment-id "$OCI_TENANCY_OCID" \
+            --shape-availabilities "$SHAPE_JSON" \
+            --region "$OCI_REGION" \
+            --output json \
+            --connection-timeout 30 \
+            --read-timeout 90 \
+            --max-retries 0 \
+            > "$RUNNER_TEMP/capacity.json" \
+            2> "$RUNNER_TEMP/capacity-error.txt"
+          CAP_RC=$?
+          set -e
 
-          echo "Mencari image ARM terbaru..."
+          if [ "$CAP_RC" -ne 0 ]; then
+            ERR=$(cat "$RUNNER_TEMP/capacity-error.txt")
+            echo "$ERR"
 
-          IMAGE_ID=$(
-            "$OCI" compute image list \
-              --compartment-id "$OCI_TENANCY_OCID" \
-              --region "$OCI_REGION" \
-              --operating-system "Oracle Linux" \
-              --shape "$OCI_SHAPE" \
-              --lifecycle-state AVAILABLE \
-              --sort-by TIMECREATED \
-              --sort-order DESC \
-              --limit 1 \
-              --query 'data[0].id' \
-              --raw-output \
-              --connection-timeout 30 \
-              --read-timeout 60
-          )
+            if echo "$ERR" | grep -qiE 'TooManyRequests|429'; then
+              echo "========================================"
+              echo "ORACLE RATE LIMIT"
+              echo "========================================"
+              echo "Capacity report kena 429. Tidak melakukan launch."
+              exit 0
+            fi
 
-          if [ -z "$IMAGE_ID" ] || \
-             [ "$IMAGE_ID" = "null" ] || \
-             [ "$IMAGE_ID" = "None" ]; then
+            echo "========================================"
+            echo "ERROR CAPACITY REPORT"
+            echo "========================================"
+            exit "$CAP_RC"
+          fi
+
+          python3 - <<'PY' > "$RUNNER_TEMP/capacity.env"
+          import json, os, shlex
+          p = os.path.join(os.environ['RUNNER_TEMP'], 'capacity.json')
+          d = json.load(open(p, encoding='utf-8')).get('data', {})
+          items = d.get('shape-availabilities') or d.get('shapeAvailabilities') or []
+          status = ''
+          count = 0
+          if items:
+              x = items[0]
+              status = x.get('availability-status') or x.get('availabilityStatus') or ''
+              count = x.get('available-count')
+              if count is None:
+                  count = x.get('availableCount', 0)
+          try:
+              count = int(count or 0)
+          except Exception:
+              count = 0
+          print('CAPACITY_STATUS=' + shlex.quote(str(status)))
+          print('AVAILABLE_COUNT=' + shlex.quote(str(count)))
+          PY
+          source "$RUNNER_TEMP/capacity.env"
+
+          echo "Capacity status: $CAPACITY_STATUS"
+          echo "Available count: $AVAILABLE_COUNT"
+
+          if [ "$CAPACITY_STATUS" = "OUT_OF_HOST_CAPACITY" ] || [ "$AVAILABLE_COUNT" -lt 1 ]; then
+            echo "========================================"
+            echo "STOK A1 BATAM MASIH HABIS"
+            echo "========================================"
+            echo "Tidak melakukan launch. Akan dicek lagi otomatis."
+            exit 0
+          fi
+
+          if [ "$CAPACITY_STATUS" != "AVAILABLE" ]; then
+            echo "========================================"
+            echo "STATUS KAPASITAS TIDAK DIKENALI"
+            echo "========================================"
+            echo "Tidak melakukan launch untuk keamanan."
+            exit 0
+          fi
+
+          echo "========================================"
+          echo "KAPASITAS A1 TERSEDIA"
+          echo "Available count: $AVAILABLE_COUNT"
+          echo "========================================"
+
+          sleep 2
+
+          # --------------------------------------------------------
+          # CARI IMAGE ARM TERBARU, SATU API CALL
+          # --------------------------------------------------------
+          "$OCI" compute image list \
+            --compartment-id "$OCI_TENANCY_OCID" \
+            --region "$OCI_REGION" \
+            --operating-system "Oracle Linux" \
+            --shape "$OCI_SHAPE" \
+            --lifecycle-state AVAILABLE \
+            --sort-by TIMECREATED \
+            --sort-order DESC \
+            --limit 1 \
+            --output json \
+            --connection-timeout 30 \
+            --read-timeout 60 \
+            --max-retries 0 > "$RUNNER_TEMP/image.json"
+
+          python3 - <<'PY' > "$RUNNER_TEMP/image.env"
+          import json, os, shlex
+          p = os.path.join(os.environ['RUNNER_TEMP'], 'image.json')
+          items = json.load(open(p, encoding='utf-8')).get('data', [])
+          x = items[0] if items else {}
+          print('IMAGE_ID=' + shlex.quote(str(x.get('id', ''))))
+          print('IMAGE_NAME=' + shlex.quote(str(x.get('display-name', ''))))
+          PY
+          source "$RUNNER_TEMP/image.env"
+
+          if [ -z "$IMAGE_ID" ]; then
             echo "ERROR: Image ARM kompatibel tidak ditemukan."
             exit 1
           fi
 
-          IMAGE_NAME=$(
-            "$OCI" compute image get \
-              --image-id "$IMAGE_ID" \
-              --region "$OCI_REGION" \
-              --query 'data."display-name"' \
-              --raw-output \
-              --connection-timeout 30 \
-              --read-timeout 60
-          )
-
           echo "Image: $IMAGE_NAME"
+          sleep 2
 
-          echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
-          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
-
-      # ============================================================
-      # 9. LAUNCH A1
-      # ============================================================
-
-      - name: Try Create Oracle A1
-        if: steps.existing.outputs.exists == 'false'
-        env:
-          OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
-          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
-          SUPPRESS_LABEL_WARNING: "True"
-        run: |
-          OCI="$RUNNER_TEMP/oci-cli/bin/oci"
-
-          AD="${{ steps.ad.outputs.ad }}"
-          IMAGE_ID="${{ steps.image.outputs.image_id }}"
-          IMAGE_NAME="${{ steps.image.outputs.image_name }}"
-
+          # --------------------------------------------------------
+          # LAUNCH SEKALI SAJA, TANPA RETRY CEPAT
+          # --------------------------------------------------------
           NAME="free-a1-$(date +%Y%m%d-%H%M%S)"
 
-          echo ""
           echo "========================================"
           echo "MENCOBA MEMBUAT ORACLE A1"
-          echo "========================================"
           echo "Region : $OCI_REGION"
           echo "AD     : $AD"
           echo "Shape  : $OCI_SHAPE"
@@ -374,15 +321,8 @@ jobs:
           echo "Image  : $IMAGE_NAME"
           echo "Name   : $NAME"
           echo "========================================"
-          echo ""
-
-          # --------------------------------------------------------
-          # LAUNCH TANPA --wait-for-state
-          # Supaya timeout polling tidak dianggap launch gagal.
-          # --------------------------------------------------------
 
           set +e
-
           "$OCI" compute instance launch \
             --availability-domain "$AD" \
             --compartment-id "$OCI_TENANCY_OCID" \
@@ -396,201 +336,59 @@ jobs:
             --output json \
             --connection-timeout 30 \
             --read-timeout 180 \
-            --max-retries 3 \
+            --max-retries 0 \
             > "$RUNNER_TEMP/launch.json" \
             2> "$RUNNER_TEMP/launch-error.txt"
-
-          STATUS=$?
-
+          LAUNCH_RC=$?
           set -e
 
-          INSTANCE_ID=""
+          if [ "$LAUNCH_RC" -ne 0 ]; then
+            ERR=$(cat "$RUNNER_TEMP/launch-error.txt")
+            echo "$ERR"
 
-          # --------------------------------------------------------
-          # JIKA POST LAUNCH SUKSES
-          # --------------------------------------------------------
-
-          if [ "$STATUS" -eq 0 ]; then
-
-            INSTANCE_ID=$(
-              python3 - <<'PY'
-          import json
-          import os
-
-          path = os.path.join(
-              os.environ["RUNNER_TEMP"],
-              "launch.json"
-          )
-
-          with open(path, "r") as f:
-              data = json.load(f)
-
-          print(data.get("data", {}).get("id", ""))
-          PY
-            )
-
-            echo "Launch request diterima Oracle."
-          fi
-
-          # --------------------------------------------------------
-          # JIKA LAUNCH ERROR
-          # --------------------------------------------------------
-
-          if [ "$STATUS" -ne 0 ]; then
-
-            ERROR_TEXT=$(cat "$RUNNER_TEMP/launch-error.txt")
-
-            echo ""
-            echo "Response Oracle:"
-            echo "$ERROR_TEXT"
-            echo ""
-
-            # ---------------- OUT OF CAPACITY ----------------
-
-            if echo "$ERROR_TEXT" | grep -qiE \
-              'Out of host capacity|Out of capacity'; then
-
-              echo "========================================"
-              echo "STOK A1 BATAM MASIH HABIS"
-              echo "========================================"
-              echo "Akan dicoba lagi otomatis."
-              exit 0
-            fi
-
-            # ---------------- RATE LIMIT ----------------
-
-            if echo "$ERROR_TEXT" | grep -qiE \
-              'TooManyRequests|429'; then
-
+            if echo "$ERR" | grep -qiE 'TooManyRequests|429'; then
               echo "========================================"
               echo "ORACLE RATE LIMIT"
               echo "========================================"
-              echo "Akan dicoba lagi otomatis."
+              echo "Tidak retry cepat. Akan dicoba lagi pada jadwal berikutnya."
               exit 0
             fi
 
-            # ---------------- TIMEOUT ----------------
-
-            if echo "$ERROR_TEXT" | grep -qiE \
-              'timed out|timeout|connection.*timed'; then
-
+            if echo "$ERR" | grep -qiE 'Out of host capacity|Out of capacity|OutOfHostCapacity|OutOfCapacity'; then
               echo "========================================"
-              echo "KONEKSI TIMEOUT"
-              echo "Mengecek apakah request tadi sebenarnya berhasil..."
+              echo "STOK A1 BATAM MASIH HABIS"
               echo "========================================"
-
-              for TRY in 1 2 3 4; do
-
-                sleep 15
-
-                echo "Pengecekan instance setelah timeout: $TRY/4"
-
-                set +e
-
-                INSTANCE_ID=$(
-                  "$OCI" compute instance list \
-                    --compartment-id "$OCI_TENANCY_OCID" \
-                    --region "$OCI_REGION" \
-                    --display-name "$NAME" \
-                    --query 'data[?@."lifecycle-state"!=`"TERMINATED"`][0].id' \
-                    --raw-output \
-                    --connection-timeout 30 \
-                    --read-timeout 60 \
-                    2>/dev/null
-                )
-
-                CHECK_STATUS=$?
-
-                set -e
-
-                if [ "$CHECK_STATUS" -eq 0 ] && \
-                   [ -n "$INSTANCE_ID" ] && \
-                   [ "$INSTANCE_ID" != "null" ] && \
-                   [ "$INSTANCE_ID" != "None" ]; then
-
-                  echo "Instance ternyata BERHASIL dibuat meskipun launch timeout."
-                  break
-                fi
-
-                INSTANCE_ID=""
-              done
-
-              if [ -z "$INSTANCE_ID" ]; then
-                echo "Instance belum ditemukan setelah timeout."
-                echo "Workflow berikutnya akan mencoba lagi."
-                exit 0
-              fi
+              echo "Kapasitas berubah sebelum launch."
+              exit 0
             fi
 
-            # ---------------- LIMIT ----------------
-
-            if echo "$ERROR_TEXT" | grep -qi \
-              'LimitExceeded'; then
-
-              echo "========================================"
-              echo "LIMIT RESOURCE ORACLE TERCAPAI"
-              echo "========================================"
-              exit 1
-            fi
-
-            # ---------------- INVALID ----------------
-
-            if echo "$ERROR_TEXT" | grep -qi \
-              'InvalidParameter'; then
-
-              echo "========================================"
-              echo "PARAMETER INSTANCE TIDAK VALID"
-              echo "========================================"
-              exit 1
-            fi
-
-            # ---------------- AUTH / RESOURCE ----------------
-
-            if echo "$ERROR_TEXT" | grep -qi \
-              'NotAuthorizedOrNotFound'; then
-
-              echo "========================================"
-              echo "RESOURCE TIDAK DITEMUKAN / TIDAK DIAKSES"
-              echo "========================================"
-              exit 1
-            fi
-
-            # Jika error tadi belum ditangani dan tidak ada instance.
-            if [ -z "$INSTANCE_ID" ]; then
-
-              echo "========================================"
-              echo "ERROR OCI TIDAK DIKENALI"
-              echo "========================================"
-
-              exit "$STATUS"
-            fi
+            echo "========================================"
+            echo "ERROR OCI TIDAK DIKENALI"
+            echo "========================================"
+            exit "$LAUNCH_RC"
           fi
 
-          # ========================================================
-          # PASTIKAN INSTANCE ID ADA
-          # ========================================================
+          INSTANCE_ID=$(python3 - <<'PY'
+          import json, os
+          p = os.path.join(os.environ['RUNNER_TEMP'], 'launch.json')
+          print(json.load(open(p, encoding='utf-8')).get('data', {}).get('id', ''))
+          PY
+          )
 
-          if [ -z "$INSTANCE_ID" ] || \
-             [ "$INSTANCE_ID" = "null" ] || \
-             [ "$INSTANCE_ID" = "None" ]; then
-
-            echo "Tidak mendapat Instance OCID."
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "ERROR: Instance OCID tidak ditemukan dari response launch."
             exit 1
           fi
 
-          echo ""
-          echo "Instance OCID ditemukan."
+          echo "Launch request diterima Oracle."
 
-          # ========================================================
-          # 10. TUNGGU INSTANCE RUNNING
-          # ========================================================
-
+          # --------------------------------------------------------
+          # TUNGGU SAMPAI RUNNING
+          # --------------------------------------------------------
           STATE=""
-
           for TRY in $(seq 1 30); do
-
+            sleep 10
             set +e
-
             STATE=$(
               "$OCI" compute instance get \
                 --instance-id "$INSTANCE_ID" \
@@ -599,46 +397,32 @@ jobs:
                 --raw-output \
                 --connection-timeout 30 \
                 --read-timeout 60 \
-                2>/dev/null
+                --max-retries 0 2>/dev/null
             )
-
-            STATE_STATUS=$?
-
+            RC=$?
             set -e
 
-            if [ "$STATE_STATUS" -ne 0 ]; then
+            if [ "$RC" -ne 0 ]; then
               echo "Check $TRY/30: koneksi sementara gagal."
-              sleep 10
               continue
             fi
 
             echo "Check $TRY/30: $STATE"
+            [ "$STATE" = "RUNNING" ] && break
 
-            if [ "$STATE" = "RUNNING" ]; then
-              break
-            fi
-
-            if [ "$STATE" = "TERMINATED" ] || \
-               [ "$STATE" = "TERMINATING" ]; then
-
+            if [ "$STATE" = "TERMINATED" ] || [ "$STATE" = "TERMINATING" ]; then
               echo "Instance gagal provisioning."
               exit 1
             fi
-
-            sleep 10
           done
 
           if [ "$STATE" != "RUNNING" ]; then
-
             echo "Instance sudah dibuat tetapi belum RUNNING."
             echo "Run berikutnya akan mendeteksinya dan tidak membuat kedua."
-
             exit 0
           fi
 
-          # ========================================================
-          # 11. AMBIL IP ADDRESS
-          # ========================================================
+          sleep 2
 
           VNIC_ID=$(
             "$OCI" compute vnic-attachment list \
@@ -648,8 +432,11 @@ jobs:
               --query 'data[0]."vnic-id"' \
               --raw-output \
               --connection-timeout 30 \
-              --read-timeout 60
+              --read-timeout 60 \
+              --max-retries 0
           )
+
+          sleep 2
 
           PRIVATE_IP=$(
             "$OCI" network vnic get \
@@ -658,8 +445,11 @@ jobs:
               --query 'data."private-ip"' \
               --raw-output \
               --connection-timeout 30 \
-              --read-timeout 60
+              --read-timeout 60 \
+              --max-retries 0
           )
+
+          sleep 2
 
           PUBLIC_IP=$(
             "$OCI" network vnic get \
@@ -669,15 +459,12 @@ jobs:
               --raw-output \
               --connection-timeout 30 \
               --read-timeout 60 \
-              2>/dev/null || true
+              --max-retries 0 2>/dev/null || true
           )
 
-          if [ "$PUBLIC_IP" = "null" ] || \
-             [ "$PUBLIC_IP" = "None" ]; then
-            PUBLIC_IP=""
-          fi
+          [ "$PUBLIC_IP" = "null" ] && PUBLIC_IP=""
+          [ "$PUBLIC_IP" = "None" ] && PUBLIC_IP=""
 
-          echo ""
           echo "========================================"
           echo "ORACLE A1 BERHASIL RUNNING"
           echo "========================================"
