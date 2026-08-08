@@ -5,11 +5,17 @@ on:
   schedule:
     - cron: '*/10 * * * *'
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -19,28 +25,29 @@ jobs:
       - name: Install Dependencies
         run: composer install --prefer-dist --no-progress
 
-      - name: Setup SSH Keys
-        run: ssh-keygen -t rsa -b 2048 -f ~/.ssh/id_rsa -N ""
-
-      - name: Create Private Key File
+      - name: Create OCI Private Key File
+        env:
+          OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
         run: |
-          echo "${{ secrets.OCI_KEY_CONTENT }}" > private_key.pem
-          chmod 600 private_key.pem
-
-      - name: Generate .env File
-        run: |
-          echo "OCI_REGION=ap-batam-1" > .env
-          echo "OCI_USER_ID=${{ secrets.OCI_USER_OCID }}" >> .env
-          echo "OCI_TENANCY_ID=${{ secrets.OCI_TENANCY_OCID }}" >> .env
-          echo "OCI_KEY_FINGERPRINT=${{ secrets.OCI_FINGERPRINT }}" >> .env
-          echo "OCI_PRIVATE_KEY_FILENAME=private_key.pem" >> .env
-          echo "OCI_SUBNET_ID=${{ secrets.OCI_SUBNET_ID }}" >> .env
-          echo "OCI_IMAGE_ID=ocid1.image.oc1.ap-batam-1.aaaaaaaawggpxox66i2n3l5mvy2fvh5i3z762k4d2vzxxd3ezygzgl5i5iqa" >> .env
-          echo "OCI_SSH_PUBLIC_KEY=~/.ssh/id_rsa.pub" >> .env
-          echo "OCI_OCPUS=2" >> .env
-          echo "OCI_MEMORY_IN_GBS=12" >> .env
-          echo "OCI_MAX_INSTANCES=1" >> .env
-          echo "OCI_SHAPE=VM.Standard.A1.Flex" >> .env
+          printf '%s\n' "$OCI_KEY_CONTENT" > "$GITHUB_WORKSPACE/private_key.pem"
+          chmod 600 "$GITHUB_WORKSPACE/private_key.pem"
 
       - name: Execute OCI ARM Check
+        env:
+          OCI_REGION: ap-batam-1
+          OCI_USER_ID: ${{ secrets.OCI_USER_OCID }}
+          OCI_TENANCY_ID: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_KEY_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_PRIVATE_KEY_FILENAME: ${{ github.workspace }}/private_key.pem
+          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+
+          OCI_IMAGE_ID: ocid1.image.oc1.ap-batam-1.aaaaaaaawggpxox66i2n3l5mvy2fvh5i3z762k4d2vzxxd3ezygzgl5i5iqa
+
+          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
+
+          OCI_OCPUS: "1"
+          OCI_MEMORY_IN_GBS: "6"
+          OCI_MAX_INSTANCES: "1"
+          OCI_SHAPE: VM.Standard.A1.Flex
+
         run: php index.php
