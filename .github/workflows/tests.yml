@@ -27,21 +27,20 @@ jobs:
           echo "${{ secrets.OCI_KEY_CONTENT }}" > private_key.pem
           chmod 600 private_key.pem
 
-      - name: Copy Env File
-        run: cp .env.example .env
+      - name: Create Valid .env File
+        run: |
+          echo "OCI_REGION=ap-batam-1" >> .env
+          echo "OCI_USER_ID=${{ secrets.OCI_USER_OCID }}" >> .env
+          echo "OCI_TENANCY_ID=${{ secrets.OCI_TENANCY_OCID }}" >> .env
+          echo "OCI_KEY_FINGERPRINT=${{ secrets.OCI_FINGERPRINT }}" >> .env
+          echo "OCI_PRIVATE_KEY_FILENAME=private_key.pem" >> .env
+          echo "OCI_SUBNET_ID=${{ secrets.OCI_SUBNET_ID }}" >> .env
+          echo "OCI_IMAGE_ID=ocid1.image.oc1.ap-batam-1.aaaaaaaawggpxox66i2n3l5mvy2fvh5i3z762k4d2vzxxd3ezygzgl5i5iqa" >> .env
+          echo "OCI_SSH_PUBLIC_KEY=~/.ssh/id_rsa.pub" >> .env
+          echo "OCI_OCPUS=2" >> .env
+          echo "OCI_MEMORY_IN_GBS=12" >> .env
+          echo "OCI_MAX_INSTANCES=1" >> .env
+          echo "OCI_SHAPE=VM.Standard.A1.Flex" >> .env
 
       - name: Execute OCI ARM Check
-        env:
-          OCI_USER_ID: ${{ secrets.OCI_USER_OCID }}
-          OCI_TENANCY_ID: ${{ secrets.OCI_TENANCY_OCID }}
-          OCI_KEY_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
-          OCI_PRIVATE_KEY_FILENAME: private_key.pem
-          OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
-          OCI_IMAGE_ID: ocid1.image.oc1.ap-batam-1.aaaaaaaawggpxox66i2n3l5mvy2fvh5i3z762k4d2vzxxd3ezygzgl5i5iqa
-          OCI_SSH_PUBLIC_KEY: ~/.ssh/id_rsa.pub
-          OCI_REGION: ap-batam-1
-          OCI_MAX_INSTANCES: 1
-          OCI_SHAPE: VM.Standard.A1.Flex
-          OCI_OCPUS: ${{ secrets.OCI_OCI_ARM_CAPACITY }}
-          OCI_MEMORY_IN_GBS: ${{ secrets.OCI_OCI_ARM_MEMORY }}
         run: php index.php
